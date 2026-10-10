@@ -17,6 +17,7 @@ try {
         'worker_pid', 'worker_ready', 'startup_error', 'startup_retry_at', 'startup_attempts', 'startup_failed_at',
         'last_received_at', 'last_forwarded_at', 'last_forwarded_id', 'paused_reason',
         'forward_retry_at', 'target_ids', 'unresolved_targets',
+        'routes_revision', 'route_config_error', 'unresolved_sources',
     ] as $key) {
         $meta[$key] = $queue->getMeta($key);
     }
@@ -79,7 +80,8 @@ try {
     $now = time();
     $heartbeat = (int) ($meta['worker_heartbeat_at'] ?? 0);
     $age = $now - $heartbeat;
-    $paused = !empty($meta['paused_reason']);
+    $paused = !empty($meta['paused_reason'])
+        && !str_starts_with($meta['paused_reason'], 'SOURCE_ACCESS:');
     $receivingReady = $alive['worker_alive'] && !$paused && ($meta['worker_ready'] ?? '0') === '1'
         && $heartbeat > 0 && $age >= 0 && $age < 30;
     $targets = [];
@@ -114,6 +116,46 @@ try {
         'queue' => $queue->stats(),
         'metadata' => $meta,
     ];
+    $sources = [];
+    $activeCount = $readyCount = 0;
+    foreach (App::queues() as $sourceId => $sourceQueue) {
+        $enabled = $sourceQueue->getMeta('source_enabled') !== '0';
+        $sourcePause = $sourceQueue->getMeta('paused_reason');
+        $activeIds = json_decode($sourceQueue->getMeta('active_target_ids') ?? 'null', true);
+        $sourceRefs = json_decode($sourceQueue->getMeta('target_refs') ?? '{}', true);
+        $sourceRefs = is_array($sourceRefs) ? $sourceRefs : [];
+        $sourceTargets = [];
+        $activeTargets = $readyTargets = 0;
+        foreach ($sourceQueue->targetStats() as $targetId => $statistics) {
+            $active = $enabled && (!is_array($activeIds) || in_array($targetId, $activeIds, true));
+            $reason = $sourceQueue->getMeta('target_pause_' . $targetId);
+            $targetReady = $receivingReady && $active && empty($sourcePause) && empty($reason);
+            $sourceTargets[$targetId] = $statistics + ['enabled' => $active,
+                'reference' => $sourceRefs[$targetId] ?? $targetId, 'ready' => $targetReady,
+                'paused' => !empty($reason), 'pause_reason' => $reason];
+            if ($active) { ++$activeTargets; }
+            if ($targetReady) { ++$readyTargets; }
+        }
+        $sourceReady = $enabled && $receivingReady && empty($sourcePause) && $readyTargets > 0;
+        $sources[$sourceId] = ['reference' => $sourceQueue->getMeta('source_reference')
+                ?? App::config()['source'], 'enabled' => $enabled, 'ready' => $sourceReady,
+            'all_targets_ready' => $sourceReady && $activeTargets === $readyTargets
+                && (json_decode($sourceQueue->getMeta('unresolved_targets') ?? '{}', true) ?: []) === [],
+            'paused' => !empty($sourcePause), 'cutoff' => (int)$sourceQueue->getMeta('source_min_id'),
+            'targets' => $sourceTargets, 'queue' => $sourceQueue->stats()];
+        if ($enabled) { ++$activeCount; }
+        if ($sources[$sourceId]['all_targets_ready']) { ++$readyCount; }
+    }
+    $status['sources'] = $sources;
+    $status['routes_revision'] = (int)($meta['routes_revision'] ?? 0);
+    $status['unresolved_sources'] = json_decode($meta['unresolved_sources'] ?? '{}', true) ?: [];
+    // Keep the legacy primary destination view for existing tools. Aggregate
+    // readiness across sources once a route registry has actually been applied.
+    if ($meta['routes_revision'] !== null) {
+        $status['ready'] = $receivingReady && array_filter($sources, static fn(array $s): bool => $s['ready']) !== [];
+        $status['all_targets_ready'] = $status['ready'] && $activeCount === $readyCount
+            && $status['unresolved_sources'] === [] && empty($meta['route_config_error']);
+    }
     fwrite(STDOUT, json_encode($status, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE
         | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . PHP_EOL);
 } catch (Throwable $error) {

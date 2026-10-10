@@ -5,9 +5,10 @@ header('X-Content-Type-Options: nosniff');
 header("Content-Security-Policy: default-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
 $ready = false;
 $allReady = false;
-$destinations = ['@hhdp3105' => false, '@honghotduongpho2027' => false];
+$sourceCount = 0;
+$targetCount = 0;
 $statusFile = '/home/dwhwlekshosting/telegram-mirror-thucunghaiza/storage/deploy/live-status.json';
-if (is_file($statusFile) && filesize($statusFile) <= 32768) {
+if (is_file($statusFile) && filesize($statusFile) <= 262144) {
     $report = json_decode((string) @file_get_contents($statusFile), true);
     $report = is_array($report) ? $report : [];
     $heartbeat = (int) ($report['metadata']['worker_heartbeat_at'] ?? 0);
@@ -18,12 +19,16 @@ if (is_file($statusFile) && filesize($statusFile) <= 32768) {
         && $generated > 0 && time() - $generated >= 0 && time() - $generated < 30
         && $heartbeat > 0 && time() - $heartbeat >= 0 && time() - $heartbeat < 30;
     $allReady = $ready && !empty($report['all_targets_ready']);
-    foreach (is_array($report['targets'] ?? null) ? $report['targets'] : [] as $destination) {
-        if (is_array($destination) && is_string($destination['reference'] ?? null)
-            && array_key_exists($destination['reference'], $destinations)) {
-            $destinations[$destination['reference']] = $ready && !empty($destination['ready']);
+    $sources = is_array($report['sources'] ?? null) ? $report['sources'] : [];
+    $targetIds = [];
+    foreach ($sources as $source) {
+        if (!is_array($source) || empty($source['enabled'])) { continue; }
+        ++$sourceCount;
+        foreach (is_array($source['targets'] ?? null) ? $source['targets'] : [] as $id => $target) {
+            if (is_array($target) && !empty($target['enabled'])) { $targetIds[$id] = true; }
         }
     }
+    $targetCount = count($targetIds);
 }
 ?>
 <!doctype html>
@@ -32,7 +37,7 @@ if (is_file($statusFile) && filesize($statusFile) <= 32768) {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <meta name="description" content="Công cụ tự đăng lại bài mới từ channel Telegram nguồn sang channel của bạn. Đang chờ hoàn tất thiết lập.">
+    <meta name="description" content="Công cụ tự đăng lại bài mới từ channel Telegram nguồn sang channel của bạn. Quản lý nhiều nguồn và channel đích.">
     <title>Telegram Mirror · thucunghaiza.site</title>
     <style>
         :root {
@@ -122,29 +127,18 @@ if (is_file($statusFile) && filesize($statusFile) <= 32768) {
         <span class="brand-name">Telegram Mirror</span>
     </div>
     <section class="card" aria-labelledby="title">
-        <div class="status<?= $allReady ? ' active' : '' ?>"><span class="dot" aria-hidden="true"></span><?= $allReady ? 'Đang hoạt động' : ($ready ? 'Một đích cần kiểm tra' : 'Chưa hoạt động') ?></div>
+        <div class="status<?= $allReady ? ' active' : '' ?>"><span class="dot" aria-hidden="true"></span><?= $allReady ? 'Đang hoạt động' : ($ready ? 'Một cấu hình cần kiểm tra' : 'Chưa hoạt động') ?></div>
         <h1 id="title">Bài mới từ nguồn,<br>cập nhật về channel của bạn.</h1>
         <p class="intro">Tự đăng lại bài mới cùng ảnh, video và nội dung từ nguồn đến các channel của bạn.</p>
-        <div class="channels" aria-label="Channel nguồn và channel đích">
-            <div class="channel">
-                <span class="label">Channel nguồn</span>
-                <a class="username" href="https://t.me/honghotduongpho0" target="_blank" rel="noopener noreferrer">@honghotduongpho0</a>
-            </div>
-            <span class="arrow" aria-hidden="true">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 12h15m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </span>
-            <div class="channel">
-                <span class="label">Channel đích</span>
-                <a class="username" href="https://t.me/hhdp3105" target="_blank" rel="noopener noreferrer">@hhdp3105</a>
-                <span class="label"><?= $destinations['@hhdp3105'] ? 'Sẵn sàng nhận bài' : 'Chưa sẵn sàng' ?></span>
-                <a class="username" href="https://t.me/honghotduongpho2027" target="_blank" rel="noopener noreferrer">@honghotduongpho2027</a>
-                <span class="label"><?= $destinations['@honghotduongpho2027'] ? 'Sẵn sàng nhận bài' : 'Chưa sẵn sàng' ?></span>
-            </div>
+        <div class="channels" aria-label="Số nguồn và đích đang được cấu hình">
+            <div class="channel"><span class="label">Nguồn đang bật</span><span class="username"><?= $sourceCount ?> channel</span></div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="channel"><span class="label">Đích đang dùng</span><span class="username"><?= $targetCount ?> channel</span></div>
         </div>
         <div class="setup">
-            <strong><?= $ready ? 'Đang nhận bài mới' : 'Hoàn tất đăng nhập Telegram' ?></strong>
-            <p><?= $ready ? 'Tool đang theo dõi channel nguồn. Bài mới được đưa vào hàng đợi để đăng lại.' : 'Mở trang đăng nhập riêng trên máy đã cấu hình tool. Khi đăng nhập và kiểm tra quyền thành công, tool sẽ tự bắt đầu nhận bài mới.' ?></p>
-            <a class="login" href="http://127.0.0.1:8765/">Đăng nhập trên máy này</a>
+            <strong><?= $ready ? 'Đang nhận bài mới' : 'Quản lý cấu hình của bạn' ?></strong>
+            <p><?= $ready ? 'Tool đang theo dõi các nguồn đã bật. Bài mới được đưa vào hàng đợi để đăng lại.' : 'Đăng nhập trang quản trị để thêm nguồn lấy bài, chọn channel đích và xem trạng thái áp dụng.' ?></p>
+            <a class="login" href="/admin.php">Đăng nhập quản trị</a>
         </div>
     </section>
     <footer>thucunghaiza.site · Trạng thái dựa trên lần cập nhật gần nhất của tool.</footer>

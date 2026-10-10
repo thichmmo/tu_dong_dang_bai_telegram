@@ -211,8 +211,15 @@ final class Queue
     }
 
     /** @param array<string, mixed> $message A raw MTProto message. */
-    public function enqueue(int $sourceId, array $message): void
+    public function enqueue(int $sourceId, array $message, ?array $activeTargetIds = null): void
     {
+        $activeTargets = null;
+        if ($activeTargetIds !== null) {
+            $activeTargets = [];
+            foreach ($activeTargetIds as $targetId) {
+                $activeTargets[self::channelId($targetId)] = true;
+            }
+        }
         $messageId = self::messageId($message['id'] ?? null);
         $date = $message['date'] ?? time();
         if (!is_int($date) || $date < 0) {
@@ -264,8 +271,11 @@ final class Queue
                 $used = [$randomId];
                 $legacyTarget = $this->getMeta('queue_legacy_target_id') ?? $this->getMeta('target_id');
                 foreach ($targets as $target) {
-                    if ($messageId <= (int) $target['cutoff']) { continue; }
                     $targetId = (int) $target['target_id'];
+                    if (($activeTargets !== null && !isset($activeTargets[$targetId]))
+                        || $messageId <= max((int) $target['cutoff'], (int) $this->getMeta('target_runtime_min_id_' . $targetId))) {
+                        continue;
+                    }
                     if ($legacyTarget !== null && $targetId === (int) $legacyTarget) {
                         $deliveryRandom = $randomId;
                     } else {

@@ -164,12 +164,12 @@ namespace TelegramMirror\Tests\Worker {
                 fclose($pipes[2]);
                 $exitCode = proc_close($process);
                 $expectedExit = $childMode === 'competing' ? 0 : 1;
+                $result = is_file($marker) ? file_get_contents($marker) : '';
                 if ($exitCode !== $expectedExit) {
                     throw new RuntimeException('Offline worker ' . $childMode . ' exited '
-                        . $exitCode . ', expected ' . $expectedExit . ': ' . $stdout . $stderr);
+                        . $exitCode . ', expected ' . $expectedExit . ': ' . $result . $stdout . $stderr);
                 }
                 ++$total;
-                $result = is_file($marker) ? file_get_contents($marker) : '';
                 if (!preg_match('/^Worker ' . preg_quote($childMode, '/') . ': (\d+) assertions passed\.\n$/D', $result, $match)) {
                     throw new RuntimeException('Offline worker ' . $childMode . ' failed: ' . $result . $stdout . $stderr);
                 }

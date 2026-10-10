@@ -8,7 +8,7 @@ Payload và thành viên lượt gửi được lưu riêng tư trước khi g�
 
 ## Phạm vi
 
-- Một channel nguồn và hai channel đích. Mỗi đích có trạng thái gửi, random ID chống trùng, thử lại và tạm dừng riêng; lỗi quyền ở một đích không dừng đích còn lại.
+- Nhiều channel nguồn, mỗi nguồn chọn một hoặc nhiều channel đích. Hàng đợi và mốc bài của từng nguồn được lưu riêng; cùng số ID bài hoặc ID album ở hai nguồn không bị trộn. Mỗi đích có random ID, thử lại và tạm dừng riêng.
 - Theo dõi bài mới bằng worker chạy liên tục; hàng đợi SQLite lưu trạng thái để hạn chế đăng trùng khi khởi động lại.
 - Thời gian cập nhật phụ thuộc kết nối, thời gian gom album, hàng đợi và giới hạn Telegram; không bảo đảm đồng bộ tức thì.
 - Chỉ nhận bài mới sau lần worker kích hoạt thành công đầu tiên, không tự nhập lịch sử. Thêm đích mới lưu mốc bài mới nhất tại lúc kích hoạt riêng cho đích đó; không chuyển backlog cũ sang đích mới. Khởi động lại giữ các mốc và random ID đã lưu.
@@ -33,6 +33,16 @@ CPanel là bảng quản lý hosting; có cPanel không đồng nghĩa gói host
 `ffi` và `uv` giúp thư viện chạy hiệu quả hơn nhưng không thay thế các điều kiện trên. Thư viện khuyến nghị CLI cho ứng dụng theo dõi sự kiện chạy lâu. [Yêu cầu MadelineProto](https://docs.madelineproto.xyz/docs/REQUIREMENTS.html)
 
 Nếu gói hosting chỉ chạy PHP qua trình duyệt, hoặc chủ hosting cấm worker chạy liên tục, bản này cần chuyển sang VPS hoặc gói hỗ trợ background worker. Cron watchdog chỉ khởi động lại worker; nó không thay đổi chính sách hoặc giới hạn của hosting.
+
+## Quản lý nguồn và đích trên website
+
+Vào `/admin.php`, đăng nhập tài khoản quản trị website để thêm, sửa, xóa hoặc tạm dừng một cấu hình nguồn → các đích. Tài khoản này quản lý tool; phiên Telegram đang lưu trên hosting tiếp tục được dùng để đọc và đăng bài. Không nhập mật khẩu Telegram ở trang quản trị.
+
+Lần đầu, chạy `php bin/admin-setup.php` trong Terminal riêng của ứng dụng để tạo link thiết lập dùng một lần. Mở link đó và tự đặt tên đăng nhập, mật khẩu quản trị. Link hết hạn sau 15 phút; có thể tạo link mới trước khi tài khoản quản trị được thiết lập. Không chia sẻ link thiết lập.
+
+Worker đọc thay đổi cấu hình tự động. Nó kiểm tra nguồn là channel, tài khoản đã tham gia và có quyền đăng ở từng đích; lỗi của nguồn mới được hiển thị và không dừng nguồn khác đang hoạt động. Bật nguồn hoặc thêm/bật lại đích bắt đầu từ bài mới tại lúc kích hoạt thành công; không nhập lịch sử đã đăng trong thời gian tạm dừng. Các bài đã nằm trong hàng đợi trước khi tạm dừng được giữ nguyên để tiếp tục xử lý. Xóa cấu hình chỉ dừng tuyến đăng, giữ dữ liệu lịch sử.
+
+Dữ liệu quản trị, mật khẩu đã băm, phiên web và `routes.json` nằm trong `storage/` riêng, ngoài thư mục công khai. Trang quản trị ghi cấu hình; worker CLI thực hiện Telegram.
 
 ## 1. Chuẩn bị tài khoản và channel
 
@@ -172,9 +182,9 @@ Tài khoản, nguồn và các ID đích đã gắn với dữ liệu được g
 
 Giữ cả session và SQLite khi nâng cấp để duy trì đăng nhập và trạng thái hàng đợi. Dừng worker trước khi sao lưu/di chuyển dữ liệu; không xóa hàng đợi hoặc session chỉ để thử khởi động lại.
 
-## Điểm đăng nhập riêng trên máy này
+## Helper đăng nhập Telegram qua QR và xác minh hai bước
 
-Mở [thucunghaiza.site](https://thucunghaiza.site), chọn **Đăng nhập trên máy này** để tới [trang riêng](http://127.0.0.1:8765/). Địa chỉ này chỉ hoạt động trên máy đang chạy bridge; nó không phải trang quản trị công khai. Nếu bridge đã dừng, chạy từ thư mục dự án:
+Helper này dùng để đăng nhập phiên Telegram lần đầu qua hosting API. Mở [trang loopback riêng](http://127.0.0.1:8765/) trên máy đang chạy bridge; trang này khác trang quản trị `/admin.php` và chỉ hoạt động trên máy đó. Nếu bridge đã dừng, chạy từ thư mục dự án:
 
 ```sh
 python3 deploy/password-bridge.py

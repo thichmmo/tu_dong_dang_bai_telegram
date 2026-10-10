@@ -17,7 +17,10 @@ try {
     $binding = App::validateAccount($api);
     App::initialize($api, $binding);
     fwrite(STDOUT, 'Đăng nhập và kiểm tra thành công.' . PHP_EOL);
-    fwrite(STDOUT, 'Nguồn: ' . $binding['source_id'] . ' → Đích: ' . $binding['target_id'] . PHP_EOL);
+    foreach ($binding['sources'] ?? [$binding['source_id'] => $binding] as $source) {
+        fwrite(STDOUT, 'Nguồn: ' . $source['source_id'] . ' → Đích: '
+            . implode(', ', array_keys($source['targets'])) . PHP_EOL);
+    }
     if (App::queue()->getMeta('source_min_id') !== null) {
         fwrite(STDOUT, 'Mốc bài cũ đã lưu: ' . App::queue()->getMeta('source_min_id') . PHP_EOL);
     } else {
@@ -26,7 +29,7 @@ try {
     if ($binding['source_protected']) {
         fwrite(STDOUT, 'Channel nguồn đang bảo vệ nội dung; worker sẽ bỏ qua bài bị chặn chuyển tiếp.' . PHP_EOL);
     }
-    fwrite(STDOUT, 'Chạy php bin/worker.php để nhận và chuyển tiếp bài mới.' . PHP_EOL);
+    fwrite(STDOUT, 'Chạy php bin/worker.php để nhận và đăng lại bài mới.' . PHP_EOL);
 } catch (Throwable $error) {
     App::fail($error);
 }

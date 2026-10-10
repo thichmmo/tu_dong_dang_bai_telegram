@@ -16,6 +16,14 @@ return [
     // queue and permission pause; new destinations begin at their activation.
     'targets' => ['@hhdp3105', '@honghotduongpho2027'],
 
+    // Optional initial routes. Strings inherit the destinations above; each
+    // route can also choose its own targets. The authenticated web dashboard
+    // saves subsequent changes privately in storage/routes.json.
+    // 'sources' => [
+    //     '@honghotduongpho0',
+    //     ['source' => '@another_source', 'targets' => ['@another_target']],
+    // ],
+
     // MTProto over verified HTTPS works with many shared hosting networks.
     // Use 'tcp' on hosts that allow direct Telegram MTProto connections.
     // Use 'wss' for secure WebSocket when HTTPS RPC responses time out;

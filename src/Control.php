@@ -302,8 +302,8 @@ final class Control
         if (!preg_match('/^[A-Za-z][A-Za-z0-9_.-]{2,31}$/D', $username)) {
             throw new InvalidArgumentException('Tên đăng nhập gồm 3–32 ký tự, bắt đầu bằng chữ, dùng chữ, số, dấu chấm, gạch ngang hoặc gạch dưới.');
         }
-        if (strlen($password) > 72 || !preg_match('/^.{12,72}$/usD', $password)) {
-            throw new InvalidArgumentException('Mật khẩu cần ít nhất 12 ký tự và không quá 72 byte.');
+        if (strlen($password) > 72 || !preg_match('/^.{10,72}$/usD', $password)) {
+            throw new InvalidArgumentException('Mật khẩu cần ít nhất 10 ký tự và không quá 72 byte.');
         }
         $hash = password_hash($password, PASSWORD_DEFAULT);
         $identity = ['username' => $username, 'auth_epoch' => bin2hex(random_bytes(24))];

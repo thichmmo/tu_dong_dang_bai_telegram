@@ -287,11 +287,11 @@ $csrf = isset($_SESSION) && is_array($_SESSION) && $control !== null ? Control::
                 <label for="username">Tên đăng nhập</label>
                 <input type="text" id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" <?= $setup ? 'minlength="3" pattern="[A-Za-z][A-Za-z0-9_.-]{2,31}"' : '' ?> required>
                 <label for="password">Mật khẩu</label>
-                <input type="password" id="password" name="password" autocomplete="<?= $setup ? 'new-password' : 'current-password' ?>" <?= $setup ? 'minlength="12"' : '' ?> maxlength="72" required>
+                <input type="password" id="password" name="password" autocomplete="<?= $setup ? 'new-password' : 'current-password' ?>" <?= $setup ? 'minlength="10"' : '' ?> maxlength="72" required>
                 <?php if ($setup): ?>
-                    <p class="help">Ít nhất 12 ký tự, tối đa 72 byte. Đây là mật khẩu quản trị website.</p>
+                    <p class="help">Ít nhất 10 ký tự, tối đa 72 byte. Đây là mật khẩu quản trị website.</p>
                     <label for="password_repeat">Nhập lại mật khẩu</label>
-                    <input type="password" id="password_repeat" name="password_repeat" autocomplete="new-password" minlength="12" maxlength="72" required>
+                    <input type="password" id="password_repeat" name="password_repeat" autocomplete="new-password" minlength="10" maxlength="72" required>
                 <?php endif; ?>
                 <button type="submit" class="wide"><?= $setup ? 'Tạo tài khoản và vào quản lý' : 'Đăng nhập' ?></button>
             </form>

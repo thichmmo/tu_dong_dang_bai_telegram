@@ -38,7 +38,7 @@ Nếu gói hosting chỉ chạy PHP qua trình duyệt, hoặc chủ hosting c�
 
 Vào `/admin.php`, đăng nhập tài khoản quản trị website để thêm, sửa, xóa hoặc tạm dừng một cấu hình nguồn → các đích. Tài khoản này quản lý tool; phiên Telegram đang lưu trên hosting tiếp tục được dùng để đọc và đăng bài. Không nhập mật khẩu Telegram ở trang quản trị.
 
-Lần đầu, chạy `php bin/admin-setup.php` trong Terminal riêng của ứng dụng để tạo link thiết lập dùng một lần. Mở link đó và tự đặt tên đăng nhập, mật khẩu quản trị. Link hết hạn sau 15 phút; có thể tạo link mới trước khi tài khoản quản trị được thiết lập. Không chia sẻ link thiết lập.
+Lần đầu, chạy `php bin/admin-setup.php` trong Terminal riêng của ứng dụng để tạo link thiết lập dùng một lần. Mở link đó và tự đặt tên đăng nhập, mật khẩu quản trị. Mật khẩu cần ít nhất 10 ký tự và không quá 72 byte. Link hết hạn sau 15 phút; có thể tạo link mới trước khi tài khoản quản trị được thiết lập. Không chia sẻ link thiết lập.
 
 Website không mở đăng ký công khai. Truy cập trực tiếp `/admin.php` chỉ hiện form đăng nhập; form thiết lập chỉ xuất hiện trong phiên đã mở link riêng hợp lệ. Yêu cầu tạo tài khoản thiếu quyền thiết lập bị chặn, kể cả khi có mã CSRF hợp lệ. Chỉ có một tài khoản quản trị; tạo thành công sẽ vô hiệu hóa link và quyền thiết lập của mọi phiên. Trước khi tài khoản được tạo, bất kỳ ai có link riêng còn hạn đều có quyền thiết lập, nên giữ link này bí mật.
 

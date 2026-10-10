@@ -95,7 +95,7 @@ try {
     $run('mirror', [$root . '/tests/mirror.php'], 0, 'Mirror: 202 assertions passed.');
     $run('repost', [$root . '/tests/repost.php'], 0, 'Repost: 52 assertions passed.');
     $run('multi-source', [$root . '/tests/multi_source.php'], 0, 'Multi-source: 123 assertions passed.');
-    $run('control', [$root . '/tests/control.php'], 0, 'Control: 114 assertions passed.');
+    $run('control', [$root . '/tests/control.php'], 0, 'Control: 116 assertions passed.');
     foreach (['transient' => 16, 'target-transient' => 18, 'permanent' => 9, 'paused' => 7, 'backoff' => 6, 'missing-baseline' => 5, 'state-unavailable' => 5, 'rpc-permanent' => 6, 'flood-wait' => 7] as $mode => $assertions) {
         $run('startup-' . $mode, [$root . '/tests/mirror.php'], 1, 'Startup ' . $mode . ': ' . $assertions . ' assertions passed.', ['TELEGRAM_MIRROR_STARTUP_TEST' => $mode]);
     }

@@ -63,6 +63,8 @@ try {
     check(!$control->setupAvailable(str_repeat('0', 64)), 'Wrong token rejected without consuming real token');
     rejects(fn() => $control->setup($token, 'ab', 'Synthetic admin password 42'), 'Short username rejected');
     rejects(fn() => $control->setup($token, 'AdminUser', 'short'), 'Short password rejected');
+    rejects(fn() => $control->setup($token, 'AdminUser', str_repeat('A', 9)), 'Nine-character password rejected at minimum boundary');
+    rejects(fn() => $control->setup($token, 'AdminUser', str_repeat('ệ', 9)), 'Nine UTF-8 characters rejected even when byte length exceeds ten');
     rejects(fn() => $control->setup($token, 'AdminUser', str_repeat('a', 73)), 'Bcrypt byte truncation prevented');
     rejects(fn() => $control->setup($token, 'AdminUser', str_repeat('ệ', 25)), 'UTF-8 byte limit prevents bcrypt truncation');
     check($control->setupAvailable($token), 'Invalid account fields do not consume invitation');
@@ -77,7 +79,7 @@ try {
     rejects(fn() => $control->setup($rotated, 'AdminUser', 'Synthetic admin password 42'), 'Expired invitation cannot create account');
     $token = $control->createSetupToken();
     $grant = $control->setupGrant($token);
-    $password = 'Synthetic admin password 42';
+    $password = str_repeat('A', 10);
     $identity = $control->setupFromGrant($grant, 'AdminUser', $password);
     same(['username', 'auth_epoch'], array_keys($identity), 'Public identity has no password hash');
     same('AdminUser', $identity['username'], 'Admin username is retained');
@@ -90,7 +92,7 @@ try {
     rejects(fn() => $control->createSetupToken(), 'Invitation minting refused after account exists');
     $record = json_decode((string) file_get_contents($directory . '/admin.json'), true);
     check(!str_contains((string) file_get_contents($directory . '/admin.json'), $password), 'Admin password plaintext is absent from persisted record');
-    check(password_verify($password, $record['password_hash']), 'Persisted admin password uses verifiable password_hash');
+    check(password_verify($password, $record['password_hash']), 'Exactly ten-character setup password is accepted and stored with verifiable password_hash');
     same($identity, $control->authenticate('adminuser', $password, 'synthetic-client-a'), 'Valid case-insensitive login returns only identity');
     same(null, $control->authenticate('AdminUser', 'wrong-password-value', 'synthetic-client-b'), 'Wrong password denied');
     same(null, $control->authenticate('MissingUser', $password, 'synthetic-client-c'), 'Wrong username denied with a valid password');

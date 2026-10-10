@@ -1,0 +1,20 @@
+{
+    "name": "local/telegram-channel-mirror",
+    "description": "Private CLI worker that forwards new posts between Telegram channels.",
+    "type": "project",
+    "require": {
+        "php": ">=8.3",
+        "php-64bit": ">=8.3",
+        "ext-pdo": "*",
+        "ext-pdo_sqlite": "*",
+        "danog/madelineproto": "8.7.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "TelegramMirror\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

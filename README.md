@@ -40,6 +40,8 @@ Vào `/admin.php`, đăng nhập tài khoản quản trị website để thêm, 
 
 Lần đầu, chạy `php bin/admin-setup.php` trong Terminal riêng của ứng dụng để tạo link thiết lập dùng một lần. Mở link đó và tự đặt tên đăng nhập, mật khẩu quản trị. Link hết hạn sau 15 phút; có thể tạo link mới trước khi tài khoản quản trị được thiết lập. Không chia sẻ link thiết lập.
 
+Website không mở đăng ký công khai. Truy cập trực tiếp `/admin.php` chỉ hiện form đăng nhập; form thiết lập chỉ xuất hiện trong phiên đã mở link riêng hợp lệ. Yêu cầu tạo tài khoản thiếu quyền thiết lập bị chặn, kể cả khi có mã CSRF hợp lệ. Chỉ có một tài khoản quản trị; tạo thành công sẽ vô hiệu hóa link và quyền thiết lập của mọi phiên. Trước khi tài khoản được tạo, bất kỳ ai có link riêng còn hạn đều có quyền thiết lập, nên giữ link này bí mật.
+
 Worker đọc thay đổi cấu hình tự động. Nó kiểm tra nguồn là channel, tài khoản đã tham gia và có quyền đăng ở từng đích; lỗi của nguồn mới được hiển thị và không dừng nguồn khác đang hoạt động. Bật nguồn hoặc thêm/bật lại đích bắt đầu từ bài mới tại lúc kích hoạt thành công; không nhập lịch sử đã đăng trong thời gian tạm dừng. Các bài đã nằm trong hàng đợi trước khi tạm dừng được giữ nguyên để tiếp tục xử lý. Xóa cấu hình chỉ dừng tuyến đăng, giữ dữ liệu lịch sử.
 
 Dữ liệu quản trị, mật khẩu đã băm, phiên web và `routes.json` nằm trong `storage/` riêng, ngoài thư mục công khai. Trang quản trị ghi cấu hình; worker CLI thực hiện Telegram.

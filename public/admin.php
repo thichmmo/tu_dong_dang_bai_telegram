@@ -208,7 +208,7 @@ $csrf = isset($_SESSION) && is_array($_SESSION) && $control !== null ? Control::
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <title><?= $identity !== null ? 'Quản lý nguồn và đích' : ($setup ? 'Tạo tài khoản quản trị' : 'Đăng nhập quản trị') ?> · Telegram Mirror</title>
+    <title><?= $identity !== null ? 'Quản lý nguồn và đích' : ($setup ? 'Thiết lập quản trị riêng' : 'Đăng nhập quản trị') ?> · Telegram Mirror</title>
     <style>
         :root { color-scheme: light dark; --bg:#f5f7fb; --surface:#fff; --text:#172539; --muted:#657389; --line:#e4eaf2; --accent:#1685ca; --soft:#edf7fd; --danger:#b63737; --danger-soft:#fff0f0; }
         * { box-sizing:border-box; }
@@ -278,8 +278,9 @@ $csrf = isset($_SESSION) && is_array($_SESSION) && $control !== null ? Control::
         <section class="card auth"><h1>Quản trị chưa sẵn sàng</h1><p class="muted">Thử tải lại trang sau ít phút.</p><a class="button secondary" href="/">Về trang chính</a></section>
     <?php elseif ($identity === null): ?>
         <section class="card auth">
-            <h1><?= $setup ? 'Tạo tài khoản quản trị' : 'Đăng nhập quản trị' ?></h1>
-            <p class="muted"><?= $setup ? 'Đặt tên đăng nhập và mật khẩu riêng để quản lý các channel.' : 'Dùng tài khoản quản trị website để chỉnh nguồn lấy bài và nơi đăng bài.' ?></p>
+            <h1><?= $setup ? 'Thiết lập quản trị riêng' : 'Đăng nhập quản trị' ?></h1>
+            <p class="muted"><?= $setup ? 'Bạn đã mở liên kết thiết lập riêng của chủ hosting. Đặt tên đăng nhập và mật khẩu để quản lý các channel.' : 'Dùng tài khoản quản trị website để chỉnh nguồn lấy bài và nơi đăng bài. Website không mở đăng ký tài khoản.' ?></p>
+            <?php if ($setup): ?><p class="help">Chỉ tạo một tài khoản quản trị. Sau khi tạo thành công, liên kết và chức năng thiết lập tự khóa.</p><?php endif; ?>
             <form method="post" action="/admin.php">
                 <input type="hidden" name="csrf" value="<?= escaped($csrf) ?>">
                 <input type="hidden" name="action" value="<?= $setup ? 'setup' : 'login' ?>">

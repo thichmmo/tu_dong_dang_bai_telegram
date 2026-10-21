@@ -205,7 +205,7 @@ namespace TelegramMirror\Tests\Worker {
     foreach ([$fixture, $fixture . '/src', $fixture . '/bin', $fixture . '/vendor', $fixture . '/storage'] as $path) {
         mkdir($path, 0700);
     }
-    foreach (['App.php', 'Queue.php', 'StartupValidationException.php', 'MirrorHandler.php', 'Repost.php'] as $file) {
+    foreach (['App.php', 'Queue.php', 'StartupValidationException.php', 'MirrorHandler.php', 'Repost.php', 'SourceHistory.php'] as $file) {
         copy(dirname(__DIR__) . '/src/' . $file, $fixture . '/src/' . $file);
     }
     copy(dirname(__DIR__) . '/bin/worker.php', $fixture . '/bin/worker.php');

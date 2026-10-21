@@ -10,6 +10,8 @@ use danog\MadelineProto\RPCErrorException;
 use danog\MadelineProto\SimpleEventHandler;
 use Throwable;
 
+require_once __DIR__ . '/SourceHistory.php';
+
 /** One Telegram session, with an isolated durable queue for each source. */
 final class MirrorHandler extends SimpleEventHandler
 {
@@ -24,11 +26,16 @@ final class MirrorHandler extends SimpleEventHandler
     /** @var array<int,array{target_id:int,target_ids:list<int>,baseline:int,protected:bool}> */
     private array $sources = [];
     private int $routesRevision = -1;
+    /** @var array<int,bool> */
+    private array $historyBusy = [];
+    private bool $scanningHistory = false;
 
     public function onStart(): void
     {
         $this->ready = false;
         if (!App::workerEventsAllowed()) { return; }
+        $this->historyBusy = [];
+        $this->scanningHistory = false;
         try {
             App::queue()->setMeta('worker_ready', '0');
             App::queue()->setMeta('worker_heartbeat_at', '0');
@@ -126,6 +133,9 @@ final class MirrorHandler extends SimpleEventHandler
             $queue->setMeta('source_revalidation_needed', '0');
             if ($startup || $queue->getMeta('worker_started_at') === null) { $queue->setMeta('worker_started_at', (string)time()); }
             $queue->setMeta('worker_ready', '1');
+            $queue->setMeta('history_required', '1');
+            $queue->setMeta('history_running', '0');
+            $queue->setMeta('last_history_checked_at', '0');
         }
         $this->sources = $sources;
         $this->sourceId = $binding['source_id'];
@@ -170,6 +180,93 @@ final class MirrorHandler extends SimpleEventHandler
             || (int)App::queue()->getMeta('global_forward_retry_at') > time();
     }
 
+    /** Recover missed update notifications without reconnecting the session. */
+    #[Cron(period: 30.0)]
+    public function reconcileSources(): void
+    {
+        if (!$this->ready || !App::workerEventsAllowed() || $this->sending || $this->scanningHistory
+            || $this->globallyPaused()) { return; }
+        $this->scanningHistory = true;
+        try {
+            if (!$this->synchronizeRoutes()) { return; }
+            $revision = $this->routesRevision;
+            $sources = $this->sources;
+            foreach ($sources as $sourceId => $source) {
+                if ($this->sending || $this->globallyPaused() || $this->routesRevision !== $revision
+                    || App::routeRevision() !== $revision || !isset($this->sources[$sourceId])
+                    || $this->sources[$sourceId] !== $source) { return; }
+                $queue = App::queue($sourceId);
+                $now = time();
+                $config = App::config();
+                $interval = max(30, (int)($config['history_poll_seconds'] ?? 60));
+                if ($queue->getMeta('source_enabled') === '0' || $queue->getMeta('paused_reason')
+                    || (int)$queue->getMeta('history_retry_at') > $now
+                    || (int)$queue->getMeta('last_history_checked_at') > $now - $interval) { continue; }
+                $cursor = max($source['baseline'], (int)$queue->getMeta('history_cursor'));
+                $this->historyBusy[$sourceId] = true;
+                $queue->setMeta('history_running', '1');
+                $queue->setMeta('history_last_attempt_at', (string)$now);
+                try {
+                    $targetCutoffs = [];
+                    foreach ($source['target_ids'] as $targetId) {
+                        $targetCutoffs[$targetId] = $queue->getMeta('target_runtime_min_id_' . $targetId);
+                    }
+                    $activation = hash('sha256', json_encode([$source['baseline'], $source['target_ids'], $targetCutoffs], JSON_THROW_ON_ERROR));
+                    if ($queue->getMeta('history_commit_pending') === '1'
+                        && $queue->getMeta('history_commit_activation') !== $activation) {
+                        throw new \RuntimeException('HISTORY_COMMIT_ACTIVATION_CHANGED');
+                    }
+                    $result = SourceHistory::collect($this, $sourceId, $cursor,
+                        (int)($config['history_page_size'] ?? 100), (int)($config['history_max_pages'] ?? 10));
+                    // Route updates may run while the RPC is awaiting a reply.
+                    // Do not commit an old activation's history to new targets.
+                    if (App::reloadRoutes() || App::routeRevision() !== $revision || $this->routesRevision !== $revision
+                        || !isset($this->sources[$sourceId]) || $queue->getMeta('source_enabled') === '0'
+                        || $queue->getMeta('paused_reason') || $this->globallyPaused()) {
+                        throw new \RuntimeException('HISTORY_ACTIVATION_CHANGED');
+                    }
+                    if (!$this->refreshSourceState($sourceId)) { throw new \RuntimeException('HISTORY_SOURCE_REVALIDATION_FAILED'); }
+                    if (App::reloadRoutes() || App::routeRevision() !== $revision || $this->routesRevision !== $revision
+                        || !isset($this->sources[$sourceId]) || $queue->getMeta('source_enabled') === '0'
+                        || $queue->getMeta('paused_reason') || $this->globallyPaused()) {
+                        throw new \RuntimeException('HISTORY_ACTIVATION_CHANGED');
+                    }
+                    $queue->setMeta('history_commit_activation', $activation);
+                    $queue->setMeta('history_commit_pending', '1');
+                    foreach ($result['messages'] as $message) {
+                        if ($this->sources[$sourceId]['protected']) { $message['noforwards'] = true; }
+                        $queue->enqueue($sourceId, $message, $source['target_ids']);
+                    }
+                    // Every enqueue commits before this cursor. A process exit
+                    // between them replays identifiers through durable dedupe.
+                    $queue->setMeta('history_cursor', (string)$result['head']);
+                    $queue->setMeta('history_commit_pending', '0');
+                    $queue->setMeta('last_history_checked_at', (string)time());
+                    $queue->setMeta('last_history_error', '');
+                    $queue->setMeta('history_retry_at', '0');
+                    $queue->setMeta('history_failures', '0');
+                    $queue->setMeta('history_last_pages', (string)$result['pages']);
+                } catch (Throwable $error) {
+                    $reason = $error instanceof RPCErrorException ? $error->rpc : $error->getMessage();
+                    if ($reason === '') { $reason = 'HISTORY_CHECK_FAILED'; }
+                    $queue->setMeta('last_history_error', $reason);
+                    $attempts = (int)$queue->getMeta('history_failures') + 1;
+                    $queue->setMeta('history_failures', (string)$attempts);
+                    $delay = $error instanceof RateLimitError ? max(1, $error->getWaitTimeLeft()) + 1
+                        : (int)min($config['retry_max_seconds'], $config['retry_base_seconds'] * (2 ** min(12, $attempts - 1)));
+                    $queue->setMeta('history_retry_at', (string)(time() + $delay));
+                    if ($error instanceof RateLimitError) { App::queue()->setMeta('global_forward_retry_at', (string)(time() + $delay)); }
+                    elseif (App::isAccountFailure($error)) { App::queue()->setMeta('paused_reason', $reason); }
+                    elseif (App::isPermanentSourceFailure($error)) { $queue->setMeta('paused_reason', 'SOURCE_ACCESS: ' . $reason); }
+                    $this->logger('Source history check failed for ' . $sourceId . ': ' . $reason);
+                } finally {
+                    unset($this->historyBusy[$sourceId]);
+                    $queue->setMeta('history_running', '0');
+                }
+            }
+        } finally { $this->scanningHistory = false; }
+    }
+
     #[Cron(period: 3.0)]
     public function drainQueue(): void
     {
@@ -179,9 +276,11 @@ final class MirrorHandler extends SimpleEventHandler
         $this->sending = true;
         try {
             foreach ($this->sources as $sourceId => $source) {
+                if (!empty($this->historyBusy[$sourceId])) { continue; }
                 $queue = App::queue($sourceId);
                 $queue->setMeta('worker_heartbeat_at', (string)time());
-                if ($queue->getMeta('paused_reason') || (int)$queue->getMeta('forward_retry_at') > time()) { continue; }
+                if ($queue->getMeta('paused_reason') || $queue->getMeta('history_commit_pending') === '1'
+                    || (int)$queue->getMeta('forward_retry_at') > time()) { continue; }
                 if ($queue->getMeta('source_revalidation_needed') === '1' && !$this->refreshSourceState($sourceId)) {
                     if ($this->globallyPaused()) { return; }
                     continue;

@@ -217,6 +217,34 @@ try {
             'Exact worker argv, owned UID and held lock FD prove a live ready worker');
         $verifyTargetStates(true);
 
+        // A live event loop is insufficient when its Telegram update feed has
+        // stalled. Successful periodic history reads provide separate proof.
+        $queue->setMeta('history_required', '1');
+        $report = $readStatus();
+        statusCheck($report['worker_alive'] && !$report['receiving_ready'] && !$report['ready']
+            && !$report['targets'][$targetA]['ready'], 'Fresh heartbeat cannot replace first source history check');
+        $queue->setMeta('last_history_checked_at', (string)time());
+        $queue->setMeta('history_cursor', '2');
+        $report = $readStatus();
+        statusCheck($report['receiving_ready'] && $report['ready'] && $report['all_targets_ready'],
+            'A recent successful history check restores receiving and delivery readiness');
+        statusCheck($report['sources'][$queueSource]['history']['cursor'] === 2
+            && $report['sources'][$queueSource]['history']['fresh'], 'Source exports finite history progress');
+        $queue->setMeta('last_history_checked_at', (string)(time() - 181));
+        $report = $readStatus();
+        statusCheck($report['worker_alive'] && !$report['ready'] && !$report['receiving_ready'],
+            'Stale source checks block false health despite a live worker');
+        $queue->setMeta('last_history_checked_at', (string)(time() + 60));
+        $report = $readStatus();
+        statusCheck(!$report['ready'], 'Future source-check timestamps cannot prove readiness');
+        $queue->setMeta('last_history_checked_at', (string)time());
+        $queue->setMeta('last_history_error', 'HISTORY_TIMEOUT');
+        $report = $readStatus();
+        statusCheck(!$report['ready'] && $report['sources'][$queueSource]['history']['failed'],
+            'A failed source read immediately invalidates older success');
+        $queue->setMeta('last_history_error', '');
+        $queue->setMeta('history_required', '0');
+
         $command('pause');
         $report = $readStatus();
         statusCheck($report['worker_alive'] && $report['paused'] && !$report['ready'],

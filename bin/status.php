@@ -18,6 +18,7 @@ try {
         'last_received_at', 'last_forwarded_at', 'last_forwarded_id', 'paused_reason',
         'forward_retry_at', 'target_ids', 'unresolved_targets',
         'routes_revision', 'route_config_error', 'unresolved_sources',
+        'history_required', 'history_cursor', 'last_history_checked_at', 'last_history_error',
     ] as $key) {
         $meta[$key] = $queue->getMeta($key);
     }
@@ -117,10 +118,19 @@ try {
         'metadata' => $meta,
     ];
     $sources = [];
-    $activeCount = $readyCount = 0;
+    $activeCount = $readyCount = $receivingSourceCount = 0;
+    $requiresHistory = false;
     foreach (App::queues() as $sourceId => $sourceQueue) {
         $enabled = $sourceQueue->getMeta('source_enabled') !== '0';
         $sourcePause = $sourceQueue->getMeta('paused_reason');
+        $historyRequired = $sourceQueue->getMeta('history_required') === '1';
+        $requiresHistory = $requiresHistory || ($enabled && $historyRequired);
+        $historyChecked = (int)$sourceQueue->getMeta('last_history_checked_at');
+        $historyError = $sourceQueue->getMeta('last_history_error') ?? '';
+        $historyPoll = max(15, min(900, (int)(App::config()['history_poll_seconds'] ?? 60)));
+        $historyFresh = !$historyRequired || ($historyChecked > 0 && $historyChecked <= $now
+            && $now - $historyChecked < max(180, $historyPoll * 3) && $historyError === '');
+        $sourceReceiving = $receivingReady && $enabled && empty($sourcePause) && $historyFresh;
         $activeIds = json_decode($sourceQueue->getMeta('active_target_ids') ?? 'null', true);
         $sourceRefs = json_decode($sourceQueue->getMeta('target_refs') ?? '{}', true);
         $sourceRefs = is_array($sourceRefs) ? $sourceRefs : [];
@@ -129,29 +139,38 @@ try {
         foreach ($sourceQueue->targetStats() as $targetId => $statistics) {
             $active = $enabled && (!is_array($activeIds) || in_array($targetId, $activeIds, true));
             $reason = $sourceQueue->getMeta('target_pause_' . $targetId);
-            $targetReady = $receivingReady && $active && empty($sourcePause) && empty($reason);
+            $targetReady = $sourceReceiving && $active && empty($reason);
             $sourceTargets[$targetId] = $statistics + ['enabled' => $active,
                 'reference' => $sourceRefs[$targetId] ?? $targetId, 'ready' => $targetReady,
                 'paused' => !empty($reason), 'pause_reason' => $reason];
             if ($active) { ++$activeTargets; }
             if ($targetReady) { ++$readyTargets; }
         }
-        $sourceReady = $enabled && $receivingReady && empty($sourcePause) && $readyTargets > 0;
+        $sourceReady = $sourceReceiving && $readyTargets > 0;
         $sources[$sourceId] = ['reference' => $sourceQueue->getMeta('source_reference')
                 ?? App::config()['source'], 'enabled' => $enabled, 'ready' => $sourceReady,
             'all_targets_ready' => $sourceReady && $activeTargets === $readyTargets
                 && (json_decode($sourceQueue->getMeta('unresolved_targets') ?? '{}', true) ?: []) === [],
             'paused' => !empty($sourcePause), 'cutoff' => (int)$sourceQueue->getMeta('source_min_id'),
-            'targets' => $sourceTargets, 'queue' => $sourceQueue->stats()];
+            'targets' => $sourceTargets, 'queue' => $sourceQueue->stats(),
+            'history' => ['required' => $historyRequired, 'fresh' => $historyFresh,
+                'checked_at' => $historyChecked > 0 ? $historyChecked : null,
+                'failed' => $historyError !== '', 'cursor' => (int)$sourceQueue->getMeta('history_cursor')]];
         if ($enabled) { ++$activeCount; }
+        if ($sourceReceiving) { ++$receivingSourceCount; }
         if ($sources[$sourceId]['all_targets_ready']) { ++$readyCount; }
+        if ($sourceId === (int)$meta['source_id'] && !$historyFresh) {
+            foreach ($status['targets'] as &$target) { $target['ready'] = false; }
+            unset($target);
+        }
     }
     $status['sources'] = $sources;
     $status['routes_revision'] = (int)($meta['routes_revision'] ?? 0);
     $status['unresolved_sources'] = json_decode($meta['unresolved_sources'] ?? '{}', true) ?: [];
     // Keep the legacy primary destination view for existing tools. Aggregate
     // readiness across sources once a route registry has actually been applied.
-    if ($meta['routes_revision'] !== null) {
+    if ($meta['routes_revision'] !== null || $requiresHistory) {
+        $status['receiving_ready'] = $receivingReady && $receivingSourceCount > 0;
         $status['ready'] = $receivingReady && array_filter($sources, static fn(array $s): bool => $s['ready']) !== [];
         $status['all_targets_ready'] = $status['ready'] && $activeCount === $readyCount
             && $status['unresolved_sources'] === [] && empty($meta['route_config_error']);

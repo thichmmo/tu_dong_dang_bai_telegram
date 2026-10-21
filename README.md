@@ -10,6 +10,7 @@ Payload và thành viên lượt gửi được lưu riêng tư trước khi g�
 
 - Nhiều channel nguồn, mỗi nguồn chọn một hoặc nhiều channel đích. Hàng đợi và mốc bài của từng nguồn được lưu riêng; cùng số ID bài hoặc ID album ở hai nguồn không bị trộn. Mỗi đích có random ID, thử lại và tạm dừng riêng.
 - Theo dõi bài mới bằng worker chạy liên tục; hàng đợi SQLite lưu trạng thái để hạn chế đăng trùng khi khởi động lại.
+- Đối chiếu lịch sử nguồn mỗi 60 giây để bù các bài bị mất thông báo cập nhật. Mốc đọc lịch sử độc lập với bài nhận trực tiếp; chỉ tăng sau khi đọc đủ các trang và đưa bài vào hàng đợi theo thứ tự. Việc đối chiếu vẫn giữ mốc kích hoạt của nguồn/từng đích và trạng thái đã gửi.
 - Thời gian cập nhật phụ thuộc kết nối, thời gian gom album, hàng đợi và giới hạn Telegram; không bảo đảm đồng bộ tức thì.
 - Chỉ nhận bài mới sau lần worker kích hoạt thành công đầu tiên, không tự nhập lịch sử. Thêm đích mới lưu mốc bài mới nhất tại lúc kích hoạt riêng cho đích đó; không chuyển backlog cũ sang đích mới. Khởi động lại giữ các mốc và random ID đã lưu.
 - Chưa đồng bộ bài sửa/xóa, bình luận, reaction, lượt xem hoặc bài ghim.
@@ -152,7 +153,9 @@ php bin/status.php
 
 Lệnh trạng thái đọc dữ liệu cục bộ, không đăng bài. Trong lần triển khai đầu, kiểm tra một bài mới và một album từ nguồn xuất hiện đúng ở channel đích trước khi để chạy lâu dài. Bản này chưa được kiểm chứng bằng tài khoản Telegram của bạn khi chưa đăng nhập và cấu hình channel đích.
 
-`receiving_ready` xác nhận worker đang nhận cập nhật; `ready` cần ít nhất một đích có thể đăng, `all_targets_ready` cần tất cả đích. Xem `targets` để kiểm tra hàng đợi và pause riêng từng đích. PID/UID/argv/khóa thật và heartbeat còn mới đều bắt buộc; xem thêm `paused_reason`, `startup_error` và `startup_retry_at` nếu khởi động không thành công. Các kiểm tra tự động trong `tests/` dùng dữ liệu giả, không thay thế việc xác nhận đăng bài thực tế.
+`receiving_ready` yêu cầu tiến trình/heartbeat hợp lệ và ít nhất một nguồn vừa được đọc đối chiếu thành công; heartbeat đơn thuần không chứng minh Telegram còn nhận bài. `ready` cần ít nhất một đích có thể đăng, `all_targets_ready` cần tất cả nguồn/đích. Mỗi nguồn có mục `history` với mốc đọc, cursor và cờ lỗi; kiểm tra quá hạn hoặc lỗi đọc khiến nguồn đó hết trạng thái sẵn sàng. Xem thêm `targets`, `paused_reason`, `startup_error` và `startup_retry_at` nếu có lỗi. Các kiểm tra tự động trong `tests/` dùng dữ liệu giả, không thay thế việc xác nhận đăng bài thực tế.
+
+`history_poll_seconds` mặc định 60, mỗi lượt đọc tối đa `history_max_pages` (mặc định 10) trang, mỗi trang `history_page_size` (mặc định 100) mục. RPC đọc có timeout và tôn trọng FloodWait. Nếu chạm giới hạn trang, phản hồi không hợp lệ hoặc lỗi giữa chừng, cursor không tăng; một lượt ghi dở bị giữ khỏi gửi cho đến khi đối chiếu lại thành công. Không giảm chu kỳ để tránh tạo quá nhiều yêu cầu Telegram. Nguồn có backlog lớn hơn giới hạn cần tăng số trang (tối đa 50) sau khi kiểm tra giới hạn tài khoản.
 
 ## 5. Cron watchdog trên cPanel
 

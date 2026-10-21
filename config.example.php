@@ -38,4 +38,10 @@ return [
     'album_settle_seconds' => 5,
     'retry_base_seconds' => 15,
     'retry_max_seconds' => 3600,
+
+    // Reconcile missed Telegram update notifications without reconnecting.
+    // Each read is bounded; an incomplete scan never advances its cursor.
+    'history_poll_seconds' => 60,
+    'history_page_size' => 100,
+    'history_max_pages' => 10,
 ];

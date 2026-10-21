@@ -6,6 +6,8 @@ Tool dùng `sendMessage`, `sendMedia` và `sendMultiMedia` để tạo bài mớ
 
 Payload và thành viên lượt gửi được lưu riêng tư trước khi gửi; retry dùng cùng nội dung và random ID. Lưu ID bài đích sau ACK đầy đủ để đối soát. Hàng cũ đã chuyển tiếp giữ nguyên; pending cũ được cách ly khi chuyển chế độ và không đăng lại. Preview của link có thể được Telegram tạo lại; chưa cam kết giữ các rendition video phụ, poll hoặc live photo.
 
+Nếu chú thích media vượt 1.024 UTF-16 units, tool đăng ảnh/album rồi đăng nguyên phần chữ và entities thành tin văn bản riêng (tối đa 4.096 units), không cắt nội dung. Kế hoạch này có random ID và ACK riêng cho từng bước; khởi động lại tiếp tục bước chưa xong, không gửi lại media đã xác nhận. Payload gốc được giữ nguyên. Lượt gửi cũ đã thử mà chưa có kế hoạch cần đối soát trước khi chuyển cách gửi; lỗi độ dài cố định không bị retry vô hạn.
+
 ## Phạm vi
 
 - Nhiều channel nguồn, mỗi nguồn chọn một hoặc nhiều channel đích. Hàng đợi và mốc bài của từng nguồn được lưu riêng; cùng số ID bài hoặc ID album ở hai nguồn không bị trộn. Mỗi đích có random ID, thử lại và tạm dừng riêng.

@@ -81,6 +81,50 @@ final class Repost
             random_id:$random,invert_media:$p['invert_media']);
     }
 
+    /** UTF-16 units match Telegram's entity offsets, including surrogate pairs. */
+    public static function utf16Length(string $text):int
+    {
+        $points=preg_match_all('/./us',$text);
+        $surrogates=preg_match_all('/[\x{10000}-\x{10FFFF}]/u',$text);
+        if($points===false||$surrogates===false){throw new RepostFailure('SOURCE_TEXT_INVALID');}
+        return $points+$surrogates;
+    }
+
+    /** Render a separate immutable transport plan; the original snapshot is retained. */
+    public static function overflowMedia(array $batch,array $payloads,array $plan):array
+    {
+        $randoms=$plan['media_random_ids']??null;$overflow=$plan['overflow_ids']??null;
+        if(($plan['version']??null)!==1||!is_array($randoms)||!array_is_list($randoms)||count($randoms)!==count($batch['ids'])
+            ||!is_array($overflow)||!array_is_list($overflow)||$overflow===[]
+            ||count(array_unique($overflow,SORT_REGULAR))!==count($overflow)){throw new RepostFailure('REPOST_CAPTION_PLAN_INVALID');}
+        $rendered=$payloads;
+        foreach($batch['ids']as$i=>$id){
+            $p=$payloads[$id]??throw new RepostFailure('FROZEN_PAYLOAD_MISSING');
+            if(!is_int($randoms[$i])||$randoms[$i]<1){throw new RepostFailure('REPOST_CAPTION_PLAN_INVALID');}
+            $long=$p['media']!==null&&self::utf16Length($p['message'])>1024;
+            if($long!==in_array($id,$overflow,true)){throw new RepostFailure('REPOST_CAPTION_PLAN_INVALID');}
+            if($long){
+                if(self::utf16Length($p['message'])>4096){throw new RepostFailure('REPOST_CAPTION_TEXT_TOO_LONG');}
+                $rendered[$id]['message']='';$rendered[$id]['entities']=[];
+            }
+        }
+        if(count(array_unique($randoms))!==count($randoms)||array_diff($overflow,$batch['ids'])!==[]){throw new RepostFailure('REPOST_CAPTION_PLAN_INVALID');}
+        $transport=$batch;$transport['random_ids']=$randoms;
+        return ['batch'=>$transport,'payloads'=>$rendered];
+    }
+
+    /** Send the complete caption as one text message, retaining raw entities. */
+    public static function sendOverflowCaption(object $api,int $target,array $payload,int $randomId):array
+    {
+        if(!is_string($payload['message']??null)||self::utf16Length($payload['message'])>4096
+            ||self::utf16Length($payload['message'])<=1024||$randomId<1
+            ||!is_array($payload['entities']??null)||!array_is_list($payload['entities'])){
+            throw new RepostFailure('REPOST_CAPTION_TEXT_TOO_LONG');
+        }
+        return $api->messages->sendMessage(peer:$target,message:$payload['message'],entities:$payload['entities'],
+            random_id:$randomId,no_webpage:true,invert_media:false);
+    }
+
     /** Refresh only rotating authorization bytes for the same primary file; semantics stay frozen. */
     public static function authorize(object $api,array $payloads,array $raw):array
     {

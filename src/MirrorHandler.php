@@ -29,11 +29,14 @@ final class MirrorHandler extends SimpleEventHandler
     /** @var array<int,bool> */
     private array $historyBusy = [];
     private bool $scanningHistory = false;
+    private bool $synchronizingRoutes = false;
 
     public function onStart(): void
     {
         $this->ready = false;
         if (!App::workerEventsAllowed()) { return; }
+        $this->sending = false;
+        $this->synchronizingRoutes = false;
         $this->historyBusy = [];
         $this->scanningHistory = false;
         try {
@@ -153,6 +156,8 @@ final class MirrorHandler extends SimpleEventHandler
     /** Apply dashboard edits inside the existing owned session. */
     private function synchronizeRoutes(): bool
     {
+        if ($this->synchronizingRoutes) { return false; }
+        $this->synchronizingRoutes = true;
         try {
             App::reloadRoutes();
             if (App::routeRevision() === $this->routesRevision) { return true; }
@@ -170,7 +175,7 @@ final class MirrorHandler extends SimpleEventHandler
             $this->logger('Route update failed: ' . $error->getMessage());
             // Rejecting an edit retains the last successfully installed map.
             return true;
-        }
+        } finally { $this->synchronizingRoutes = false; }
     }
 
     private function globallyPaused(): bool
@@ -271,10 +276,10 @@ final class MirrorHandler extends SimpleEventHandler
     public function drainQueue(): void
     {
         if (!$this->ready || !App::workerEventsAllowed() || $this->sending) { return; }
-        App::queue()->setMeta('worker_heartbeat_at', (string)time());
-        if ($this->globallyPaused() || !$this->synchronizeRoutes()) { return; }
         $this->sending = true;
         try {
+            App::queue()->setMeta('worker_heartbeat_at', (string)time());
+            if ($this->globallyPaused() || !$this->synchronizeRoutes()) { return; }
             foreach ($this->sources as $sourceId => $source) {
                 if (!empty($this->historyBusy[$sourceId])) { continue; }
                 $queue = App::queue($sourceId);
@@ -310,6 +315,7 @@ final class MirrorHandler extends SimpleEventHandler
         $sourceId = (int)$batch['source_id'];
         $queue = App::queue($sourceId);
         $frozenLoaded = false;
+        $overflowPrepared = false;
         try {
             if (($batch['delivery_mode'] ?? '') !== 'repost' || $queue->getMeta('delivery_mode') !== 'repost') {
                 $queue->setMeta('paused_reason', 'REPOST_MODE_NOT_ACTIVATED');
@@ -333,6 +339,8 @@ final class MirrorHandler extends SimpleEventHandler
                 $payloads = $queue->frozenPayloads($sourceId, $batch['ids']);
             }
             $queue->freezeRepostBatch($batch, $targetId);
+            $overflow = $queue->prepareOverflow($batch, $targetId, $payloads, ($batch['batch_key'] ?? null) === null);
+            $overflowPrepared = $overflow !== null;
             $payloads = Repost::authorize($this, $payloads, $raw);
             // Containment can be committed while source reads are in progress.
             if ($queue->getMeta('paused_reason') || $queue->getMeta('target_pause_' . $targetId) || $this->globallyPaused()) { return false; }
@@ -343,16 +351,46 @@ final class MirrorHandler extends SimpleEventHandler
                 App::queue()->setMeta('route_config_error', $routeError->getMessage());
                 if (App::routeRevision() !== $this->routesRevision) { return false; }
             }
-            $result = Repost::send($this, $targetId, $batch, $payloads);
-            if (Repost::processingPending($result)) {
-                $this->retry($batch, 'REPOST_VIDEO_PROCESSING_RECONCILIATION_REQUIRED', null, $targetId);
-                $queue->setMeta('target_pause_' . $targetId, 'REPOST_VIDEO_PROCESSING_RECONCILIATION_REQUIRED');
-                return true;
+            $confirmed = $overflow['media_ack'] ?? null;
+            if ($overflow === null || $confirmed === null) {
+                $transport = $overflow === null ? ['batch' => $batch, 'payloads' => $payloads]
+                    : Repost::overflowMedia($batch, $payloads, $overflow);
+                $result = Repost::send($this, $targetId, $transport['batch'], $transport['payloads']);
+                if (Repost::processingPending($result)) {
+                    $this->retry($batch, 'REPOST_VIDEO_PROCESSING_RECONCILIATION_REQUIRED', null, $targetId);
+                    $queue->setMeta('target_pause_' . $targetId, 'REPOST_VIDEO_PROCESSING_RECONCILIATION_REQUIRED');
+                    return true;
+                }
+                $confirmed = Repost::acknowledgements($result, $transport['batch']['random_ids'], $targetId);
+                if ($confirmed === null) {
+                    $this->retry($batch, 'UNCONFIRMED_REPOST_RESPONSE', null, $targetId);
+                    return true;
+                }
+                if ($overflow !== null) {
+                    $overflow = $queue->rememberOverflowMediaAck($batch, $targetId, $confirmed);
+                    $confirmed = $overflow['media_ack'];
+                }
             }
-            $confirmed = Repost::acknowledgements($result, $batch['random_ids'], $targetId);
-            if ($confirmed === null) {
-                $this->retry($batch, 'UNCONFIRMED_REPOST_RESPONSE', null, $targetId);
-                return true;
+            if ($overflow !== null) {
+                foreach ($overflow['overflow_ids'] as $id) {
+                    if (isset($overflow['caption_acks'][$id])) { continue; }
+                    // Each step may await an RPC; check authorization again
+                    // before the next outbound side effect, retaining its ACK.
+                    if (!$this->overflowStepAllowed($sourceId, $targetId)) { return false; }
+                    $random = $overflow['caption_random_ids'][$id];
+                    $result = Repost::sendOverflowCaption($this, $targetId, $payloads[$id], $random);
+                    if (Repost::processingPending($result)) {
+                        $this->retry($batch, 'REPOST_VIDEO_PROCESSING_RECONCILIATION_REQUIRED', null, $targetId);
+                        $queue->setMeta('target_pause_' . $targetId, 'REPOST_VIDEO_PROCESSING_RECONCILIATION_REQUIRED');
+                        return true;
+                    }
+                    $ack = Repost::acknowledgements($result, [$random], $targetId);
+                    if ($ack === null) {
+                        $this->retry($batch, 'UNCONFIRMED_REPOST_RESPONSE', null, $targetId);
+                        return true;
+                    }
+                    $overflow = $queue->rememberOverflowCaptionAck($batch, $targetId, $id, $ack[(string)$random]);
+                }
             }
             $queue->markReposted($batch, $targetId, $confirmed);
             $queue->setMeta('last_forwarded_at', (string) time());
@@ -360,7 +398,7 @@ final class MirrorHandler extends SimpleEventHandler
             if ($targetId === (int)$queue->getMeta('target_id')) { $queue->setMeta('last_forwarded_id', (string) max($batch['ids'])); }
             $this->logger('Reposted to ' . $targetId . ': ' . implode(',', $batch['ids']));
         } catch (RepostFailure $error) {
-            if ($frozenLoaded || !empty($batch['batch_key'])) {
+            if ($frozenLoaded || $overflowPrepared || !empty($batch['batch_key'])) {
                 $queue->setMeta('target_pause_' . $targetId, 'REPOST_RECONCILIATION_REQUIRED: ' . $error->getMessage());
                 return true;
             }
@@ -374,7 +412,9 @@ final class MirrorHandler extends SimpleEventHandler
             return false;
         } catch (RPCErrorException $error) {
             $rpc = $error->rpc;
-            if (in_array($rpc, [
+            if (in_array($rpc, ['MEDIA_CAPTION_TOO_LONG', 'MESSAGE_TOO_LONG'], true)) {
+                $queue->setMeta('target_pause_' . $targetId, 'REPOST_CAPTION_RECONCILIATION_REQUIRED: ' . $rpc);
+            } elseif (in_array($rpc, [
                 'CHAT_FORWARDS_RESTRICTED', 'MESSAGE_ID_INVALID', 'MSG_ID_INVALID',
                 'MESSAGE_IDS_EMPTY', 'BROADCAST_PUBLIC_VOTERS_FORBIDDEN',
                 'QUIZ_ANSWER_MISSING', 'MEDIA_EMPTY', 'MEDIA_FILE_INVALID',
@@ -404,9 +444,42 @@ final class MirrorHandler extends SimpleEventHandler
                 $this->retry($batch, $rpc, null, $targetId);
             }
         } catch (Throwable $error) {
+            if (in_array($error->getMessage(), ['REPOST_CAPTION_RECONCILIATION_REQUIRED', 'REPOST_CAPTION_TEXT_TOO_LONG'], true)) {
+                $queue->setMeta('target_pause_' . $targetId, $error->getMessage());
+                return true;
+            }
             $this->retry($batch, $error->getMessage(), null, $targetId);
         }
         return true;
+    }
+
+    private function overflowStepAllowed(int $sourceId, int $targetId): bool
+    {
+        $queue = App::queue($sourceId);
+        if ($queue->getMeta('paused_reason') || $queue->getMeta('target_pause_' . $targetId) || $this->globallyPaused()
+            || !isset($this->sources[$sourceId]) || !in_array($targetId, $this->sources[$sourceId]['target_ids'], true)
+            || $queue->getMeta('source_enabled') === '0') { return false; }
+        try {
+            if (App::reloadRoutes() || App::routeRevision() !== $this->routesRevision) { return false; }
+        } catch (Throwable $error) {
+            App::queue()->setMeta('route_config_error', $error->getMessage());
+            if (App::routeRevision() !== $this->routesRevision) { return false; }
+        }
+        if (!$this->refreshSourceState($sourceId)) { return false; }
+        if ($this->sources[$sourceId]['protected']) {
+            $queue->setMeta('target_pause_' . $targetId, 'REPOST_PROTECTION_RECONCILIATION_REQUIRED');
+            return false;
+        }
+        // Revalidation can itself await a response while a route is edited.
+        try {
+            if (App::reloadRoutes() || App::routeRevision() !== $this->routesRevision) { return false; }
+        } catch (Throwable $error) {
+            App::queue()->setMeta('route_config_error', $error->getMessage());
+            if (App::routeRevision() !== $this->routesRevision) { return false; }
+        }
+        return !$queue->getMeta('paused_reason') && !$queue->getMeta('target_pause_' . $targetId)
+            && !$this->globallyPaused() && $queue->getMeta('source_enabled') !== '0'
+            && isset($this->sources[$sourceId]) && in_array($targetId, $this->sources[$sourceId]['target_ids'], true);
     }
 
     /** @param array<string, mixed> $batch */

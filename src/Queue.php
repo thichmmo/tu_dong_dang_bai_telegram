@@ -106,6 +106,7 @@ final class Queue
             if (!in_array($name, $columns, true)) { $this->database->exec('ALTER TABLE queue_deliveries ADD COLUMN ' . $name . ' ' . $definition); }
         }
         $this->database->exec('CREATE TABLE IF NOT EXISTS queue_repost_payloads (source_id INTEGER NOT NULL, message_id INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(source_id,message_id))');
+        $this->database->exec('CREATE TABLE IF NOT EXISTS queue_repost_overflow (batch_key TEXT PRIMARY KEY, plan TEXT NOT NULL, progress TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
         $this->database->exec('CREATE UNIQUE INDEX IF NOT EXISTS queue_destination_message ON queue_deliveries(target_id,destination_message_id) WHERE destination_message_id IS NOT NULL');
         $this->database->exec('COMMIT');
         } catch (Throwable $e) { $this->database->exec('ROLLBACK'); throw $e; }
@@ -523,6 +524,307 @@ final class Queue
         if(array_map('intval',array_column($rows,'message_id'))!==$batch['ids']||array_map('intval',array_column($rows,'random_id'))!==$batch['random_ids']||array_unique(array_column($rows,'status'))!==['pending']){throw new RuntimeException('Frozen batch membership changed.');}
     }
 
+    /**
+     * Persist a caption-overflow request before sending it. Existing delivery
+     * random IDs and frozen payload bytes are never changed by this protocol.
+     * freshAttempt is reserved for a known new request or an audited migration.
+     */
+    public function prepareOverflow(array $batch, int $targetId, array $payloads, bool $freshAttempt = false): ?array
+    {
+        $this->database->exec('BEGIN IMMEDIATE');
+        try {
+            $context = $this->overflowContext($batch, $targetId, $payloads);
+            $plan = $this->overflowPlan($context);
+            if ($plan === null && $context['overflow_ids'] !== []) {
+                if ($context['status'] !== 'pending' || ($context['frozen'] && !$freshAttempt)) {
+                    throw new RuntimeException('REPOST_CAPTION_RECONCILIATION_REQUIRED');
+                }
+                // prepareOverflow can also be called before freezeRepostBatch.
+                if (!$context['frozen']) {
+                    $put = $this->database->prepare("UPDATE queue_deliveries SET batch_key=? WHERE source_id=? AND target_id=? AND message_id=? AND random_id=? AND status='pending' AND delivery_mode='repost' AND batch_key IS NULL");
+                    foreach ($context['ids'] as $index => $id) {
+                        $put->execute([$context['batch_key'], $context['source_id'], $targetId, $id, $context['random_ids'][$index]]);
+                        if ($put->rowCount() !== 1) { throw new RuntimeException('REPOST_CAPTION_BATCH_CHANGED'); }
+                    }
+                }
+                $used = array_fill_keys($context['random_ids'], true);
+                // Exclude every ID already reserved by another overflow plan.
+                foreach ($this->database->query('SELECT plan FROM queue_repost_overflow') as $row) {
+                    $other = json_decode($row['plan'], true, 64, JSON_THROW_ON_ERROR);
+                    foreach ([...($other['media_random_ids'] ?? []), ...array_values($other['caption_random_ids'] ?? [])] as $id) {
+                        $used[$id] = true;
+                    }
+                }
+                $exists = $this->database->prepare('SELECT 1 FROM queue_deliveries WHERE random_id=? LIMIT 1');
+                $newRandom = static function () use (&$used, $exists): int {
+                    do {
+                        $id = random_int(1, PHP_INT_MAX);
+                        if (isset($used[$id])) { continue; }
+                        $exists->execute([$id]);
+                        if ($exists->fetchColumn() !== false) { continue; }
+                        $used[$id] = true;
+                        return $id;
+                    } while (true);
+                };
+                $media = [];
+                foreach ($context['ids'] as $_) { $media[] = $newRandom(); }
+                $captions = [];
+                foreach ($context['overflow_ids'] as $id) { $captions[$id] = $newRandom(); }
+                $immutable = [
+                    'version' => 1, 'batch_key' => $context['batch_key'],
+                    'source_id' => $context['source_id'], 'target_id' => $targetId,
+                    'ids' => $context['ids'], 'random_ids' => $context['random_ids'],
+                    'payload_sha256' => $context['payload_sha256'],
+                    'media_random_ids' => $media, 'overflow_ids' => $context['overflow_ids'],
+                    'caption_random_ids' => $captions,
+                ];
+                $progress = ['media_ack' => null, 'caption_acks' => []];
+                $put = $this->database->prepare('INSERT INTO queue_repost_overflow(batch_key,plan,progress,created_at,updated_at) VALUES(?,?,?,?,?)');
+                $now = time();
+                $put->execute([$context['batch_key'], json_encode($immutable, JSON_THROW_ON_ERROR),
+                    json_encode($progress, JSON_THROW_ON_ERROR), $now, $now]);
+                $plan = $immutable + $progress;
+            }
+            $this->database->exec('COMMIT');
+            return $plan;
+        } catch (Throwable $error) {
+            $this->database->exec('ROLLBACK');
+            throw $error;
+        }
+    }
+
+    /** Translate network media random IDs back to immutable delivery random IDs. */
+    public function rememberOverflowMediaAck(array $batch, int $targetId, array $networkAck): array
+    {
+        $this->database->exec('BEGIN IMMEDIATE');
+        try {
+            $context = $this->overflowContext($batch, $targetId);
+            $plan = $this->overflowPlan($context) ?? throw new RuntimeException('REPOST_CAPTION_PLAN_MISSING');
+            $media = self::overflowAck($networkAck, $plan['media_random_ids']);
+            $translated = [];
+            foreach ($plan['random_ids'] as $index => $random) {
+                $translated[$random] = $media[$plan['media_random_ids'][$index]];
+            }
+            if ($plan['media_ack'] !== null && $plan['media_ack'] !== $translated) {
+                throw new RuntimeException('REPOST_CAPTION_ACK_CHANGED');
+            }
+            if ($plan['media_ack'] !== null) {
+                $this->database->exec('COMMIT');
+                return $plan;
+            }
+            if (array_intersect(array_values($translated), array_values($plan['caption_acks'])) !== []) {
+                throw new RuntimeException('REPOST_CAPTION_ACK_INVALID');
+            }
+            $plan['media_ack'] = $translated;
+            $this->storeOverflowProgress($plan);
+            $this->database->exec('COMMIT');
+            return $plan;
+        } catch (Throwable $error) {
+            $this->database->exec('ROLLBACK');
+            throw $error;
+        }
+    }
+
+    /** Remember each sidecar acknowledgement before the next network operation. */
+    public function rememberOverflowCaptionAck(array $batch, int $targetId, int $sourceMessageId, int $destinationMessageId): array
+    {
+        $this->database->exec('BEGIN IMMEDIATE');
+        try {
+            $context = $this->overflowContext($batch, $targetId);
+            $plan = $this->overflowPlan($context) ?? throw new RuntimeException('REPOST_CAPTION_PLAN_MISSING');
+            if ($plan['media_ack'] === null || !in_array($sourceMessageId, $plan['overflow_ids'], true) || $destinationMessageId < 1) {
+                throw new RuntimeException('REPOST_CAPTION_ACK_INVALID');
+            }
+            $old = $plan['caption_acks'][$sourceMessageId] ?? null;
+            if ($old !== null && $old !== $destinationMessageId) { throw new RuntimeException('REPOST_CAPTION_ACK_CHANGED'); }
+            if ($old !== null) {
+                $this->database->exec('COMMIT');
+                return $plan;
+            }
+            $other = $plan['caption_acks'];
+            unset($other[$sourceMessageId]);
+            if (in_array($destinationMessageId, [...array_values($other), ...array_values($plan['media_ack'])], true)) {
+                throw new RuntimeException('REPOST_CAPTION_ACK_INVALID');
+            }
+            $plan['caption_acks'][$sourceMessageId] = $destinationMessageId;
+            // Canonical insertion order makes repeated calls and restart reads identical.
+            $ordered = [];
+            foreach ($plan['overflow_ids'] as $id) {
+                if (isset($plan['caption_acks'][$id])) { $ordered[$id] = $plan['caption_acks'][$id]; }
+            }
+            $plan['caption_acks'] = $ordered;
+            $this->storeOverflowProgress($plan);
+            $this->database->exec('COMMIT');
+            return $plan;
+        } catch (Throwable $error) {
+            $this->database->exec('ROLLBACK');
+            throw $error;
+        }
+    }
+
+    /** Caller holds the write transaction; bind plan identity to stored bytes. */
+    private function overflowContext(array $batch, int $targetId, ?array $supplied = null): array
+    {
+        $source = $batch['source_id'] ?? null;
+        $ids = $batch['ids'] ?? null;
+        $randoms = $batch['random_ids'] ?? null;
+        if (!is_int($source) || !is_array($ids) || !array_is_list($ids) || $ids === [] || count($ids) > 10
+            || !is_array($randoms) || !array_is_list($randoms) || count($randoms) !== count($ids)
+            || ($batch['delivery_mode'] ?? null) !== 'repost'
+            || (isset($batch['target_id']) && $batch['target_id'] !== $targetId)
+            || $this->getMeta('delivery_mode') !== 'repost'
+            || (int) $this->getMeta('source_id') !== $source
+            || (int) $this->getMeta('repost_activated_at') < 1) {
+            throw new RuntimeException('REPOST_CAPTION_BATCH_INVALID');
+        }
+        self::channelId($source); self::channelId($targetId);
+        $target = $this->database->prepare('SELECT source_id FROM queue_targets WHERE target_id=?');
+        $target->execute([$targetId]);
+        if ($target->fetchColumn() !== $source) { throw new RuntimeException('REPOST_CAPTION_BATCH_CHANGED'); }
+        foreach ([...$ids, ...$randoms] as $id) {
+            if (!is_int($id) || $id < 1) { throw new RuntimeException('REPOST_CAPTION_BATCH_INVALID'); }
+        }
+        $sorted = $ids; sort($sorted, SORT_NUMERIC);
+        if ($sorted !== $ids || count(array_unique($ids)) !== count($ids) || count(array_unique($randoms)) !== count($ids)) {
+            throw new RuntimeException('REPOST_CAPTION_BATCH_INVALID');
+        }
+        $key = hash('sha256', json_encode([$source, $targetId, $ids, $randoms], JSON_THROW_ON_ERROR));
+        if (isset($batch['batch_key']) && $batch['batch_key'] !== $key) { throw new RuntimeException('REPOST_CAPTION_BATCH_CHANGED'); }
+        $get = $this->database->prepare('SELECT message_id,random_id,batch_key,status,delivery_mode,destination_message_id FROM queue_deliveries WHERE source_id=? AND target_id=? AND message_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') ORDER BY message_id');
+        $get->execute([$source, $targetId, ...$ids]);
+        $rows = $get->fetchAll();
+        if (array_column($rows, 'message_id') !== $ids || array_column($rows, 'random_id') !== $randoms
+            || array_values(array_unique(array_column($rows, 'delivery_mode'))) !== ['repost']) {
+            throw new RuntimeException('REPOST_CAPTION_BATCH_CHANGED');
+        }
+        $statuses = array_values(array_unique(array_column($rows, 'status')));
+        $keys = array_values(array_unique(array_column($rows, 'batch_key'), SORT_REGULAR));
+        if (count($statuses) !== 1 || !in_array($statuses[0], ['pending', 'forwarded'], true)
+            || count($keys) !== 1 || ($keys[0] !== null && $keys[0] !== $key)) {
+            throw new RuntimeException('REPOST_CAPTION_BATCH_CHANGED');
+        }
+        if ($keys[0] !== null) {
+            $get = $this->database->prepare('SELECT message_id,random_id FROM queue_deliveries WHERE source_id=? AND target_id=? AND batch_key=? ORDER BY message_id');
+            $get->execute([$source, $targetId, $key]); $members = $get->fetchAll();
+            if (array_column($members, 'message_id') !== $ids || array_column($members, 'random_id') !== $randoms) {
+                throw new RuntimeException('REPOST_CAPTION_BATCH_CHANGED');
+            }
+        }
+        $get = $this->database->prepare('SELECT payload FROM queue_repost_payloads WHERE source_id=? AND message_id=?');
+        $bytes = []; $overflow = [];
+        if ($supplied !== null && count($supplied) !== count($ids)) { throw new RuntimeException('REPOST_CAPTION_PAYLOAD_CHANGED'); }
+        foreach ($ids as $id) {
+            $get->execute([$source, $id]); $encoded = $get->fetchColumn();
+            $raw = is_string($encoded) ? base64_decode($encoded, true) : false;
+            $payload = $raw === false ? false : unserialize($raw, ['allowed_classes' => false]);
+            if (!is_array($payload) || ($payload['version'] ?? null) !== 1 || serialize($payload) !== $raw
+                || !is_string($payload['message'] ?? null) || !array_key_exists('media', $payload)
+                || ($payload['media'] !== null && !is_array($payload['media']))) {
+                throw new RuntimeException('REPOST_CAPTION_PAYLOAD_INVALID');
+            }
+            if ($supplied !== null && (!isset($supplied[$id]) || !is_array($supplied[$id])
+                || serialize(self::overflowSemantics($supplied[$id])) !== serialize(self::overflowSemantics($payload)))) {
+                throw new RuntimeException('REPOST_CAPTION_PAYLOAD_CHANGED');
+            }
+            $bytes[$id] = $raw;
+            if ($payload['media'] !== null) {
+                $length = self::overflowTextLength($payload['message']);
+                if ($length > 1024) {
+                    if ($length > 4096) { throw new RuntimeException('REPOST_CAPTION_TEXT_TOO_LONG'); }
+                    $overflow[] = $id;
+                }
+            }
+        }
+        return ['batch_key' => $key, 'source_id' => $source, 'target_id' => $targetId,
+            'ids' => $ids, 'random_ids' => $randoms, 'payload_sha256' => hash('sha256', serialize($bytes)),
+            'overflow_ids' => $overflow, 'frozen' => $keys[0] !== null, 'status' => $statuses[0], 'rows' => $rows];
+    }
+
+    private static function overflowSemantics(array $payload): array
+    {
+        // Only the two primary-file authorization fields may rotate on retry.
+        if (in_array($payload['media']['_'] ?? null, ['inputMediaPhoto', 'inputMediaDocument'], true)
+            && is_array($payload['media']['id'] ?? null)) {
+            unset($payload['media']['id']['access_hash'], $payload['media']['id']['file_reference']);
+        }
+        return $payload;
+    }
+
+    private static function overflowTextLength(string $text): int
+    {
+        $points = preg_match_all('/./us', $text);
+        $pairs = preg_match_all('/[\x{10000}-\x{10FFFF}]/u', $text);
+        if ($points === false || $pairs === false) { throw new RuntimeException('REPOST_CAPTION_PAYLOAD_INVALID'); }
+        return $points + $pairs;
+    }
+
+    /** Read and validate immutable request plus durable ACK progress. */
+    private function overflowPlan(array $context): ?array
+    {
+        $get = $this->database->prepare('SELECT plan,progress FROM queue_repost_overflow WHERE batch_key=?');
+        $get->execute([$context['batch_key']]); $row = $get->fetch();
+        if ($row === false) { return null; }
+        $plan = json_decode($row['plan'], true, 64, JSON_THROW_ON_ERROR);
+        $progress = json_decode($row['progress'], true, 64, JSON_THROW_ON_ERROR);
+        if (!is_array($plan) || !is_array($progress) || ($plan['version'] ?? null) !== 1) {
+            throw new RuntimeException('REPOST_CAPTION_PLAN_INVALID');
+        }
+        foreach (['batch_key', 'source_id', 'target_id', 'ids', 'random_ids', 'payload_sha256', 'overflow_ids'] as $field) {
+            if (!array_key_exists($field, $plan) || $plan[$field] !== $context[$field]) { throw new RuntimeException('REPOST_CAPTION_PLAN_CHANGED'); }
+        }
+        $media = $plan['media_random_ids'] ?? null; $captions = $plan['caption_random_ids'] ?? null;
+        if (!is_array($media) || !array_is_list($media) || count($media) !== count($plan['ids']) || !is_array($captions)
+            || array_keys($captions) !== $plan['overflow_ids']) { throw new RuntimeException('REPOST_CAPTION_PLAN_INVALID'); }
+        $new = [...$media, ...array_values($captions)];
+        foreach ($new as $random) {
+            if (!is_int($random) || $random < 1) { throw new RuntimeException('REPOST_CAPTION_PLAN_INVALID'); }
+        }
+        if (count(array_unique($new)) !== count($new) || array_intersect($new, $plan['random_ids']) !== []
+            || !array_key_exists('media_ack', $progress) || !is_array($progress['caption_acks'] ?? null)) {
+            throw new RuntimeException('REPOST_CAPTION_PLAN_INVALID');
+        }
+        if ($progress['media_ack'] !== null) { $progress['media_ack'] = self::overflowAck($progress['media_ack'], $plan['random_ids']); }
+        $seen = $progress['media_ack'] === null ? [] : array_values($progress['media_ack']);
+        foreach ($progress['caption_acks'] as $id => $destination) {
+            if (!in_array($id, $plan['overflow_ids'], true) || !is_int($destination) || $destination < 1
+                || in_array($destination, $seen, true) || $progress['media_ack'] === null) { throw new RuntimeException('REPOST_CAPTION_ACK_INVALID'); }
+            $seen[] = $destination;
+        }
+        if ($context['status'] === 'forwarded') {
+            if ($progress['media_ack'] === null || count($progress['caption_acks']) !== count($plan['overflow_ids'])) {
+                throw new RuntimeException('REPOST_CAPTION_COMPLETION_INVALID');
+            }
+            foreach ($context['rows'] as $index => $delivery) {
+                if ($delivery['destination_message_id'] !== $progress['media_ack'][$plan['random_ids'][$index]]) {
+                    throw new RuntimeException('REPOST_CAPTION_COMPLETION_INVALID');
+                }
+            }
+        }
+        return $plan + $progress;
+    }
+
+    private static function overflowAck(array $ack, array $randoms): array
+    {
+        if (count($ack) !== count($randoms)) { throw new RuntimeException('REPOST_CAPTION_ACK_INVALID'); }
+        $ordered = [];
+        foreach ($randoms as $random) {
+            $destination = $ack[$random] ?? null;
+            if (!is_int($destination) || $destination < 1 || in_array($destination, $ordered, true)) {
+                throw new RuntimeException('REPOST_CAPTION_ACK_INVALID');
+            }
+            $ordered[$random] = $destination;
+        }
+        return $ordered;
+    }
+
+    private function storeOverflowProgress(array $plan): void
+    {
+        $put = $this->database->prepare('UPDATE queue_repost_overflow SET progress=?,updated_at=? WHERE batch_key=?');
+        $put->execute([json_encode(['media_ack' => $plan['media_ack'], 'caption_acks' => $plan['caption_acks']], JSON_THROW_ON_ERROR),
+            time(), $plan['batch_key']]);
+        if ($put->rowCount() !== 1) { throw new RuntimeException('REPOST_CAPTION_PLAN_CHANGED'); }
+    }
+
     /** Complete ACK and final destination IDs commit together under stable random IDs. */
     public function markReposted(array $batch, int $targetId, array $ack): void
     {
@@ -531,6 +833,15 @@ final class Queue
         try{
             $key=hash('sha256',json_encode([$batch['source_id'],$targetId,$batch['ids'],$batch['random_ids']],JSON_THROW_ON_ERROR));
             $this->validateFrozenBatch($batch,$targetId,$key);
+            $overflow = $this->database->prepare('SELECT 1 FROM queue_repost_overflow WHERE batch_key=?');
+            $overflow->execute([$key]);
+            if ($overflow->fetchColumn() !== false) {
+                $plan = $this->overflowPlan($this->overflowContext($batch, $targetId));
+                if ($plan['media_ack'] === null || count($plan['caption_acks']) !== count($plan['overflow_ids'])
+                    || self::overflowAck($ack, $batch['random_ids']) !== $plan['media_ack']) {
+                    throw new RuntimeException('REPOST_CAPTION_COMPLETION_INCOMPLETE');
+                }
+            }
             $put=$this->database->prepare("UPDATE queue_deliveries SET status='forwarded',destination_message_id=?,reason=NULL,next_attempt=0,updated_at=? WHERE source_id=? AND message_id=? AND target_id=? AND random_id=? AND status='pending' AND delivery_mode='repost'");
             foreach($batch['ids']as$i=>$id){
                 $destination=$ack[(string)$batch['random_ids'][$i]]??null;

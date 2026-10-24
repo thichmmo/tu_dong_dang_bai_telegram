@@ -111,20 +111,16 @@ try {
     removeQrImages();
     writeState($statePath, 'starting');
     $settings = App::settings();
-    // Diagnostic CLI mode for the pinned 8.7.0 library: its self-restart
-    // hook keeps the session in this process rather than a detached IPC
-    // process. The normal exclusive session lock still applies.
-    $fullInstance = in_array('--full-instance', $argv, true);
+    // Always retain this lock owner's session in the foreground. The legacy
+    // --full-instance option is still accepted, but is no longer required.
     $hadRestartFlag = array_key_exists('MadelineSelfRestart', $_GET);
     $oldRestartFlag = $_GET['MadelineSelfRestart'] ?? null;
-    if ($fullInstance) { $_GET['MadelineSelfRestart'] = 1; }
+    $_GET['MadelineSelfRestart'] = 1;
     try {
         $api = new API(App::path('telegram.session'), $settings);
     } finally {
-        if ($fullInstance) {
-            if ($hadRestartFlag) { $_GET['MadelineSelfRestart'] = $oldRestartFlag; }
-            else { unset($_GET['MadelineSelfRestart']); }
-        }
+        if ($hadRestartFlag) { $_GET['MadelineSelfRestart'] = $oldRestartFlag; }
+        else { unset($_GET['MadelineSelfRestart']); }
     }
     // Existing IPC connections queue constructor settings asynchronously.
     // Apply them before requesting a QR so the selected transport is active.

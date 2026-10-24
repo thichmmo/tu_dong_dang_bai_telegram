@@ -6,6 +6,7 @@ import json
 import re
 import secrets
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,6 +25,7 @@ empty_verified = False
 empty_probe = None
 retired_requests = set()
 WATCH = '/bin/bash ' + APP + '/deploy/watch-worker.sh >/dev/null 2>&1'
+START_WORKER_AFTER_LOGIN = True
 ALLOWED = {'wrong_password', 'source_join_required', 'target_post_permission_required',
            'storage_binding_mismatch', 'invalid_channel', 'invalid_envelope', 'login_failed', 'request_conflict'}
 
@@ -329,6 +331,8 @@ def status():
             # removal of this exact immutable request's cron command.
             remove_own_cron(active['command'])
             if phase == 'success':
+                if not START_WORKER_AFTER_LOGIN:
+                    return {'status': 'success'}
                 if not active.get('watch_started'):
                     if not any(r.get('command') == WATCH for r in client.api2('Cron', 'listcron')):
                         client.api2('Cron', 'add_line', minute='*', hour='*', day='*', month='*', weekday='*', command=WATCH)
@@ -495,6 +499,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    # Recovery can validate login while the repaired worker is still staged.
+    START_WORKER_AFTER_LOGIN = '--no-start-worker' not in sys.argv[1:]
     client = CPanel()
     restore_active()
     server = ThreadingHTTPServer(('127.0.0.1', 8765), Handler)

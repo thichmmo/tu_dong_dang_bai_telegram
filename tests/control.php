@@ -181,7 +181,7 @@ try {
     file_put_contents($directory . '/deploy/live-status.json', json_encode($live));
     chmod($directory . '/deploy/live-status.json', 0600);
     $safeStatus = $control->status();
-    same(['fresh', 'running', 'revision', 'config_rejected', 'routes'], array_keys($safeStatus), 'Status exports only finite keys');
+    same(['fresh', 'running', 'needs_login', 'revision', 'config_rejected', 'routes'], array_keys($safeStatus), 'Status exports only finite keys');
     check($safeStatus['running'], 'Fresh live worker recognized');
     same(3, $safeStatus['revision'], 'Applied revision parsed from finite numeric field');
     same(['@first_source' => true], $safeStatus['routes'], 'Readiness contains only normalized configured refs');
@@ -199,6 +199,61 @@ try {
     $live['generated_at'] = time(); $live['paused'] = true;
     file_put_contents($directory . '/deploy/live-status.json', json_encode($live));
     check(!$control->status()['running'], 'Durable pause takes precedence over ready');
+
+    foreach (['AUTH_KEY_DUPLICATED', 'AUTH_KEY_UNREGISTERED', 'SESSION_REVOKED', 'SESSION_EXPIRED', 'AUTH_KEY_INVALID'] as $code) {
+        $live['metadata']['paused_reason'] = 'STARTUP: Telegram returned ' . $code . ' sensitive-auth-detail';
+        file_put_contents($directory . '/deploy/live-status.json', json_encode($live));
+        $safeStatus = $control->status();
+        check($safeStatus['needs_login'] && !$safeStatus['running'], 'Revoked authorization requires private login: ' . $code);
+        same(false, $safeStatus['routes']['@first_source'], 'Authorization failure overrides contradictory route readiness');
+        check(!str_contains(json_encode($safeStatus), $code) && !str_contains(json_encode($safeStatus), 'sensitive-auth-detail'),
+            'Authorization status exposes only a finite flag');
+    }
+    foreach (['CHAT_WRITE_FORBIDDEN', 'SOURCE_ACCESS: CHANNEL_PRIVATE', 'AUTH_KEY_INVALID_SUFFIX', ['AUTH_KEY_INVALID']] as $reason) {
+        check(!Control::needsTelegramLogin(['metadata' => ['paused_reason' => $reason]]), 'Non-auth pauses and malformed reasons do not request login');
+    }
+    check(Control::needsTelegramLogin(['metadata' => ['startup_error' => 'RPC error (SESSION_REVOKED)']]), 'Startup authorization failure is recognized');
+    check(!Control::needsTelegramLogin(['metadata' => ['api_hash' => 'AUTH_KEY_INVALID']]), 'Unrelated private fields cannot trigger auth diagnosis');
+    check(Control::needsTelegramLogin(['needs_login' => true]), 'Explicit finite status flag is accepted');
+    check(!Control::needsTelegramLogin(['needs_login' => 'true', 'metadata' => 'malformed']), 'Malformed metadata and non-boolean status flag are ignored');
+    check(!Control::needsTelegramLogin(['metadata' => ['paused_reason' => str_repeat('x', 1024) . ' AUTH_KEY_INVALID']]),
+        'Exception inspection has a fixed byte limit');
+    file_put_contents($directory . '/deploy/live-status.json', json_encode(['generated_at' => time(), 'metadata' => 'malformed']));
+    $malformedStatus = $control->status();
+    check(!$malformedStatus['needs_login'] && !$malformedStatus['running'], 'Malformed report metadata remains unknown without an exception');
+    $live['generated_at'] = time() - 61;
+    file_put_contents($directory . '/deploy/live-status.json', json_encode($live));
+    $safeStatus = $control->status();
+    check($safeStatus['needs_login'] && !$safeStatus['fresh'] && !$safeStatus['running'], 'Last known auth failure remains distinct from a fresh health claim');
+
+    $publicRoot = $directory . '/public-fixture';
+    mkdir($publicRoot . '/storage/deploy', 0700, true);
+    $previousRoot = getenv('TELEGRAM_MIRROR_ROOT');
+    putenv('TELEGRAM_MIRROR_ROOT=' . $publicRoot);
+    $renderIndex = static function (): string {
+        ob_start();
+        try { require dirname(__DIR__) . '/public/index.php'; return (string) ob_get_clean(); }
+        catch (Throwable $error) { ob_end_clean(); throw $error; }
+    };
+    try {
+        file_put_contents($publicRoot . '/storage/deploy/live-status.json', json_encode($live));
+        $html = $renderIndex();
+        check(str_contains($html, 'Phiên Telegram đã mất hiệu lực, cần đăng nhập lại'), 'Public page gives the finite recovery hint');
+        check(str_contains($html, 'Lần cập nhật gần nhất ghi nhận:'), 'Stale auth diagnosis is explicitly last known');
+        check(!str_contains($html, 'sensitive-auth-detail') && !str_contains($html, 'synthetic-secret')
+            && !str_contains($html, 'AUTH_KEY_INVALID'), 'Public hint never renders private exception data');
+        check(!str_contains($html, 'class="status active"') && !str_contains($html, 'name="password"'), 'Auth failure shows no healthy badge or Telegram credential form');
+        $live['generated_at'] = time(); $live['paused'] = false;
+        $live['metadata']['paused_reason'] = ''; $live['all_targets_ready'] = true;
+        file_put_contents($publicRoot . '/storage/deploy/live-status.json', json_encode($live));
+        $html = $renderIndex();
+        check(str_contains($html, 'class="status active"') && !str_contains($html, 'Phiên Telegram đã mất hiệu lực'),
+            'A healthy replacement report clears the recovery hint');
+        file_put_contents($publicRoot . '/storage/deploy/live-status.json', '{broken');
+        $html = $renderIndex();
+        check(!str_contains($html, 'class="status active"') && !str_contains($html, 'Phiên Telegram đã mất hiệu lực'),
+            'Invalid status JSON remains unknown without inventing an auth cause');
+    } finally { putenv($previousRoot === false ? 'TELEGRAM_MIRROR_ROOT' : 'TELEGRAM_MIRROR_ROOT=' . $previousRoot); }
 
     file_put_contents($directory . '/routes.json', '{broken');
     rejects(fn() => $control->routes(), 'Corrupt route configuration fails closed');

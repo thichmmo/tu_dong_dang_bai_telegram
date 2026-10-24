@@ -605,6 +605,28 @@ final class App
         }
         self::persistSourceRegistry($binding);
         self::clearStartupRetry();
+        // A new login repairs an invalid authorization, not a deterministic
+        // history failure or a Telegram rate limit. Retained inactive sources
+        // also share this account and are inspected by the local supervisor.
+        $invalidAuthorization = [
+            'AUTH_KEY_INVALID', 'AUTH_KEY_UNREGISTERED', 'AUTH_KEY_DUPLICATED',
+            'SESSION_REVOKED', 'SESSION_EXPIRED', 'SESSION_PASSWORD_NEEDED',
+        ];
+        foreach (self::queues() as $queue) {
+            if ($queue->getMeta('account_id') !== (string)$binding['account_id']) { continue; }
+            $pause = $queue->getMeta('paused_reason');
+            if (in_array($pause, $invalidAuthorization, true)
+                || str_starts_with($pause ?? '', 'SOURCE_ACCESS: ')
+                    && in_array(substr($pause, strlen('SOURCE_ACCESS: ')), $invalidAuthorization, true)) {
+                $queue->setMeta('paused_reason', '');
+            }
+            if (!in_array($queue->getMeta('last_history_error'), $invalidAuthorization, true)) { continue; }
+            $queue->setMeta('last_history_error', '');
+            foreach (['history_retry_at', 'history_failures', 'last_history_checked_at',
+                'history_running', 'history_last_attempt_at'] as $key) {
+                $queue->setMeta($key, '0');
+            }
+        }
     }
 
     /** @return array<string,mixed> Only successfully activated routes are returned. */

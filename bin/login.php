@@ -12,7 +12,17 @@ try {
     if (!App::acquireLock()) {
         throw new RuntimeException('Worker hoặc login đang chạy. Dừng worker và Cron Job trước khi đăng nhập.');
     }
-    $api = new API(App::path('telegram.session'), App::settings());
+    // Keep this lock owner's session in the foreground process. A detached
+    // IPC daemon must not retain an authorization after this helper exits.
+    $hadFullFlag = array_key_exists('MadelineSelfRestart', $_GET);
+    $oldFullFlag = $_GET['MadelineSelfRestart'] ?? null;
+    $_GET['MadelineSelfRestart'] = 1;
+    try {
+        $api = new API(App::path('telegram.session'), App::settings());
+    } finally {
+        if ($hadFullFlag) { $_GET['MadelineSelfRestart'] = $oldFullFlag; }
+        else { unset($_GET['MadelineSelfRestart']); }
+    }
     $api->start();
     $binding = App::validateAccount($api);
     App::initialize($api, $binding);

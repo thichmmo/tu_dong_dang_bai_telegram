@@ -236,10 +236,25 @@ final class Control
         return is_string($value) && is_string($session['csrf'] ?? null) && hash_equals($session['csrf'], $value);
     }
 
+    /** Interpret only finite authorization failures; never return exception text. */
+    public static function needsTelegramLogin(array $report): bool
+    {
+        if (($report['needs_login'] ?? null) === true) { return true; }
+        $metadata = is_array($report['metadata'] ?? null) ? $report['metadata'] : [];
+        foreach ([$metadata['paused_reason'] ?? null, $metadata['startup_error'] ?? null,
+            $report['pause_reason'] ?? null] as $reason) {
+            if (!is_string($reason)) { continue; }
+            if (preg_match('/(?<![A-Z0-9_])(?:AUTH_KEY_DUPLICATED|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED|AUTH_KEY_INVALID)(?![A-Z0-9_])/',
+                substr($reason, 0, 1024)) === 1) { return true; }
+        }
+        return false;
+    }
+
     /** Return only finite worker facts, never raw metadata, errors, or Telegram account data. */
     public function status(): array
     {
-        $result = ['fresh' => false, 'running' => false, 'revision' => null, 'config_rejected' => false, 'routes' => []];
+        $result = ['fresh' => false, 'running' => false, 'needs_login' => false,
+            'revision' => null, 'config_rejected' => false, 'routes' => []];
         $directory = $this->storage . '/deploy';
         if (is_link($directory) || !is_dir($directory)) { return $result; }
         $file = $directory . '/live-status.json';
@@ -247,20 +262,22 @@ final class Control
         try { $report = json_decode((string) file_get_contents($file), true, 32, JSON_THROW_ON_ERROR); }
         catch (Throwable) { return $result; }
         if (!is_array($report)) { return $result; }
+        $result['needs_login'] = self::needsTelegramLogin($report);
+        $metadata = is_array($report['metadata'] ?? null) ? $report['metadata'] : [];
         $generated = $report['generated_at'] ?? 0;
-        $heartbeat = $report['metadata']['worker_heartbeat_at'] ?? 0;
+        $heartbeat = $metadata['worker_heartbeat_at'] ?? 0;
         if (!is_numeric($generated) || !is_numeric($heartbeat)) { return $result; }
         $result['fresh'] = time() - (int) $generated >= 0 && time() - (int) $generated < 60;
-        $result['running'] = $result['fresh'] && !empty($report['ready']) && !empty($report['worker_alive'])
+        $result['running'] = !$result['needs_login'] && $result['fresh'] && !empty($report['ready']) && !empty($report['worker_alive'])
             && empty($report['paused']) && time() - (int) $heartbeat >= 0 && time() - (int) $heartbeat < 60;
-        $revision = $report['metadata']['routes_revision'] ?? $report['routes_revision'] ?? null;
+        $revision = $metadata['routes_revision'] ?? $report['routes_revision'] ?? null;
         if (is_int($revision) || (is_string($revision) && ctype_digit($revision))) { $result['revision'] = (int) $revision; }
-        $result['config_rejected'] = !empty($report['metadata']['route_config_error']);
+        $result['config_rejected'] = !empty($metadata['route_config_error']);
         $sourceReports = $report['sources'] ?? $report['routes'] ?? [];
         foreach (is_array($sourceReports) ? $sourceReports : [] as $route) {
             if (!is_array($route)) { continue; }
             try { $source = self::normalizePeer($route['reference'] ?? $route['source'] ?? null); } catch (Throwable) { continue; }
-            $result['routes'][$source] = !empty($route['ready']);
+            $result['routes'][$source] = !$result['needs_login'] && !empty($route['ready']);
         }
         foreach (is_array($report['unresolved_sources'] ?? null) ? $report['unresolved_sources'] : [] as $reference => $_reason) {
             try { $source = self::normalizePeer($reference); } catch (Throwable) { continue; }

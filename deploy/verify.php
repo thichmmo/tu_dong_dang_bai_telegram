@@ -97,14 +97,16 @@ try {
     $run('multi-source', [$root . '/tests/multi_source.php'], 0, 'Multi-source: 123 assertions passed.');
     $run('source-history', [$root . '/tests/source_history.php'], 0, 'Source history: 141 assertions passed.');
     $run('caption-overflow', [$root . '/tests/caption_overflow.php'], 0, 'Caption overflow: 142 assertions passed.');
-    $run('control', [$root . '/tests/control.php'], 0, 'Control: 116 assertions passed.');
+    $run('control', [$root . '/tests/control.php'], 0, 'Control: 148 assertions passed.');
     foreach (['transient' => 16, 'target-transient' => 18, 'permanent' => 9, 'paused' => 7, 'backoff' => 6, 'missing-baseline' => 5, 'state-unavailable' => 5, 'rpc-permanent' => 6, 'flood-wait' => 7] as $mode => $assertions) {
         $run('startup-' . $mode, [$root . '/tests/mirror.php'], 1, 'Startup ' . $mode . ': ' . $assertions . ' assertions passed.', ['TELEGRAM_MIRROR_STARTUP_TEST' => $mode]);
     }
     $run('delivery-crash', [$root . '/tests/mirror.php'], 1, 'Delivery crash: 14 assertions passed.', ['TELEGRAM_MIRROR_DELIVERY_TEST' => 'accepted-before-commit']);
     $run('lock', [$root . '/tests/lock.php'], 0, 'Lock: 9 assertions passed.');
     $run('lock-inheritance', [$root . '/tests/lock.php'], 0, 'Lock inheritance: 4 assertions passed.', ['TELEGRAM_MIRROR_LOCK_INHERITANCE_TEST' => '1']);
-    $run('worker', [$root . '/tests/worker.php'], 0, 'Worker bootstrap: 198 assertions passed.');
+    $run('worker', [$root . '/tests/worker.php'], 0, 'Worker bootstrap: 281 assertions passed.');
+    $run('login-owner', [$root . '/tests/login_owner.php'], 0, 'Login ownership: 515 assertions passed.');
+    $run('supervisor', [$root . '/tests/supervisor.php'], 0, 'Supervisor: 74 assertions passed.');
     $run('status', [$root . '/tests/status.php'], 0, 'Status liveness: 54 assertions passed.');
     $run('twofa', [$root . '/tests/twofa.php'], 0, 'Two-factor CLI: 366 assertions passed.');
     $run('twofa-crypto', [$root . '/deploy/twofa-crypto-check.php'], 0, 'PASS Node/PHP HKDF AES-GCM interop and metadata tamper rejection.');

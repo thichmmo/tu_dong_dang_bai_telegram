@@ -26,6 +26,9 @@ namespace danog\MadelineProto {
         public static int $forwardCalls = 0;
         public static array $constructorFullFlags = [];
         public static array $loopFullFlags = [];
+        public static array $ownerIds = [];
+        public static array $loopOwnerIds = [];
+        public static int $finalizeCalls = 0;
         public \TelegramMirror\Tests\Worker\Messages $messages;
         public \TelegramMirror\Tests\Worker\Channels $channels;
 
@@ -35,6 +38,7 @@ namespace danog\MadelineProto {
             $this->channels = new \TelegramMirror\Tests\Worker\Channels();
             if ($session !== '') {
                 ++self::$constructors;
+                self::$ownerIds[] = spl_object_id($this);
                 self::$constructorFullFlags[] = $_GET['MadelineSelfRestart'] ?? null;
                 if (self::$mode === 'transient') {
                     throw new \RuntimeException('Offline bootstrap connection failed');
@@ -64,11 +68,14 @@ namespace danog\MadelineProto {
         }
         public function getId(array $message): int { return \TelegramMirror\Tests\Worker\SOURCE; }
         public function logger(string $message): void {}
-    }
-    class SimpleEventHandler extends API
-    {
-        public static function startAndLoop(string $session, Settings $settings): void
+        public static function finalize(): void { ++self::$finalizeCalls; }
+        public static function startAndLoopMulti(array $instances, array|string $eventHandler): void
         {
+            if (count($instances) !== 1 || !$instances[0] instanceof self
+                || $eventHandler !== \TelegramMirror\MirrorHandler::class) {
+                throw new \RuntimeException('Worker must reuse exactly one existing API owner.');
+            }
+            self::$loopOwnerIds[] = spl_object_id($instances[0]);
             ++API::$loopCalls;
             API::$loopFullFlags[] = $_GET['MadelineSelfRestart'] ?? null;
             if (API::$mode === 'loop-transient') {
@@ -77,8 +84,33 @@ namespace danog\MadelineProto {
             ++API::$handlerStarts;
             $handler = new \TelegramMirror\MirrorHandler();
             $handler->onStart();
+            if (API::$mode === 'runtime-invalidated') {
+                \TelegramMirror\App::queue()->setMeta('paused_reason', 'AUTH_KEY_DUPLICATED');
+                \Revolt\EventLoop::tick();
+                throw new \RuntimeException('Invalidated worker must terminate before sending.');
+            }
             $handler->drainQueue();
         }
+    }
+    class SimpleEventHandler extends API {}
+}
+
+namespace Revolt {
+    final class EventLoop
+    {
+        public static array $callbacks = [];
+        public static array $cancelled = [];
+        public static array $unreferenced = [];
+        public static function repeat(float $interval, callable $callback): string
+        {
+            if ($interval !== 3.0) { throw new \RuntimeException('Unexpected session guard interval.'); }
+            $id = 'guard-' . (count(self::$callbacks) + count(self::$cancelled));
+            self::$callbacks[$id] = $callback;
+            return $id;
+        }
+        public static function cancel(string $id): void { self::$cancelled[] = $id; unset(self::$callbacks[$id]); }
+        public static function unreference(string $id): void { self::$unreferenced[] = $id; }
+        public static function tick(): void { foreach (self::$callbacks as $callback) { $callback(); } }
     }
 }
 
@@ -104,7 +136,8 @@ namespace TelegramMirror\Tests\Worker {
     const SOURCE = -1001234567890;
     const TARGET = -1002234567890;
     const MODES = ['transient', 'permanent', 'missing-session', 'unauthenticated',
-        'competing', 'boot-failure', 'handler-transient', 'loop-transient', 'backoff', 'paused'];
+        'competing', 'boot-failure', 'handler-transient', 'loop-transient', 'backoff', 'paused',
+        'auth-paused', 'revoked-paused', 'runtime-invalidated'];
 
     final class Channels
     {
@@ -239,6 +272,10 @@ namespace TelegramMirror\Tests\Worker {
         $queue->setMeta('startup_retry_at', (string) (time() + 60));
     } elseif ($mode === 'paused') {
         $queue->setMeta('paused_reason', 'CHAT_WRITE_FORBIDDEN');
+    } elseif ($mode === 'auth-paused') {
+        $queue->setMeta('paused_reason', 'AUTH_KEY_DUPLICATED');
+    } elseif ($mode === 'revoked-paused') {
+        $queue->setMeta('paused_reason', 'STARTUP: SESSION_REVOKED');
     }
     $foreignLock = null;
     if ($mode === 'competing') {
@@ -253,7 +290,7 @@ namespace TelegramMirror\Tests\Worker {
     $worker = $fixture . '/bin/worker.php';
     $resultPath = getenv('TELEGRAM_MIRROR_WORKER_RESULT');
     $primaryReturned = false;
-    register_shutdown_function(function () use ($mode, $fixture, $queue, $worker, $foreignLock, $resultPath, $originalRandomIds, $originalGet, &$primaryReturned): void {
+    register_shutdown_function(function () use ($mode, $fixture, &$queue, $worker, $foreignLock, $resultPath, $originalRandomIds, $originalGet, &$primaryReturned): void {
         global $assertions;
         try {
             same(null, error_get_last(), 'Worker exits intentionally without an uncaught PHP error');
@@ -262,7 +299,9 @@ namespace TelegramMirror\Tests\Worker {
                 'API authorization preflight runs with full-instance mode enabled');
             same(API::$loopCalls === 0 ? [] : [1], API::$loopFullFlags,
                 'The forwarding loop runs with full-instance mode enabled');
-            if ($mode !== 'handler-transient') {
+            same(array_slice(API::$ownerIds, 0, API::$loopCalls), API::$loopOwnerIds,
+                'The loop uses the exact API object authorized by this lock owner');
+            if (!in_array($mode, ['handler-transient', 'runtime-invalidated'], true)) {
                 same($originalGet, $_GET, 'Thrown bootstrap failures restore the original full-instance flag scope');
             }
             same('10', $queue->getMeta('source_min_id'), 'Bootstrap failures cannot rebase the cutoff');
@@ -295,7 +334,14 @@ namespace TelegramMirror\Tests\Worker {
                 // This recovery simulates the next process. PHP exit inside
                 // onStart does not unwind finally blocks in the dying process.
                 $_GET = $originalGet;
+                \Revolt\EventLoop::$callbacks = [];
+                $constructorsBeforeRecovery = API::$constructors;
+                $finalizedBeforeRecovery = API::$finalizeCalls;
                 require $worker;
+                same($constructorsBeforeRecovery + 1, API::$constructors, 'Recovery opens exactly one API owner');
+                same(end(API::$ownerIds), end(API::$loopOwnerIds), 'Recovered loop reuses its authorized API owner');
+                same($finalizedBeforeRecovery + 1, API::$finalizeCalls, 'Normal loop completion finalizes the owner before releasing full-instance scope');
+                same([], \Revolt\EventLoop::$callbacks, 'Normal loop completion removes the session guard');
                 same($originalGet, $_GET, 'Healthy bootstrap completion restores the original full-instance flag scope');
                 same('1', $queue->getMeta('worker_ready'), 'Healthy next bootstrap activates the worker');
                 same((string) getmypid(), $queue->getMeta('worker_pid'), 'Recovered owner records its PID');
@@ -303,6 +349,15 @@ namespace TelegramMirror\Tests\Worker {
                 same('10', $queue->getMeta('source_min_id'), 'Recovered bootstrap preserves the cutoff');
                 same(0, API::$historyCalls, 'Recovered bootstrap does not read history again');
                 same(1, $queue->stats()['forwarded'], 'Recovered worker drains the retained post');
+            } elseif ($mode === 'runtime-invalidated') {
+                same('AUTH_KEY_DUPLICATED', $queue->getMeta('paused_reason'), 'Invalid-key guard preserves the exact persistent pause');
+                same('0', $queue->getMeta('worker_ready'), 'Invalid-key guard clears readiness');
+                same('0', $queue->getMeta('worker_heartbeat_at'), 'Invalid-key guard clears heartbeat');
+                same('0', $queue->getMeta('startup_retry_at'), 'Invalid-key guard does not schedule another Telegram startup');
+                same(false, App::workerEventsAllowed(), 'Invalid-key guard disables all source callbacks');
+                same([], \Revolt\EventLoop::$callbacks, 'Invalid-key guard cancels itself before exit');
+                same(1, count(\Revolt\EventLoop::$unreferenced), 'Session guard does not keep a completed healthy loop alive');
+                same(1, API::$constructors, 'Runtime invalidation never opens a replacement API');
             } elseif (in_array($mode, ['permanent', 'missing-session', 'unauthenticated'], true)) {
                 check(str_starts_with($queue->getMeta('paused_reason') ?? '', 'STARTUP:'), 'Permanent bootstrap failure requires manual recovery');
                 same('0', $queue->getMeta('startup_retry_at'), 'Permanent bootstrap failure does not automatically retry');
@@ -315,7 +370,12 @@ namespace TelegramMirror\Tests\Worker {
                 if ($mode === 'paused') {
                     same('CHAT_WRITE_FORBIDDEN', $queue->getMeta('paused_reason'), 'Worker bootstrap preserves existing permission pause');
                 }
-                if (in_array($mode, ['backoff', 'paused'], true)) {
+                if (in_array($mode, ['auth-paused', 'revoked-paused'], true)) {
+                    same($mode === 'auth-paused' ? 'AUTH_KEY_DUPLICATED' : 'STARTUP: SESSION_REVOKED',
+                        $queue->getMeta('paused_reason'), 'Unattended restart preserves invalidated session pause');
+                    same('0', $queue->getMeta('startup_retry_at'), 'Invalidated sessions have no automatic network retry');
+                }
+                if (in_array($mode, ['backoff', 'paused', 'auth-paused', 'revoked-paused'], true)) {
                     same('0', $queue->getMeta('worker_ready'), 'Gated restart clears readiness left by an older process');
                 }
             }
@@ -326,7 +386,13 @@ namespace TelegramMirror\Tests\Worker {
             if ($resultPath !== false && $resultPath !== '') { file_put_contents($resultPath, 'FAIL: ' . $error->getMessage()); }
             throw $error;
         } finally {
-            if (class_exists(App::class, false)) { App::releaseLock(); }
+            if (class_exists(App::class, false)) {
+                App::releaseLock();
+                $reflection = new \ReflectionClass(App::class);
+                $reflection->getProperty('queue')->setValue(null, null);
+                $reflection->getProperty('sourceQueues')->setValue(null, []);
+            }
+            $queue = null;
             if (is_resource($foreignLock)) { flock($foreignLock, LOCK_UN); fclose($foreignLock); }
             removeFixture($fixture);
         }

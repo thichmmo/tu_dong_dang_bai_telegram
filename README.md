@@ -35,7 +35,11 @@ CPanel là bảng quản lý hosting; có cPanel không đồng nghĩa gói host
 
 `ffi` và `uv` giúp thư viện chạy hiệu quả hơn nhưng không thay thế các điều kiện trên. Thư viện khuyến nghị CLI cho ứng dụng theo dõi sự kiện chạy lâu. [Yêu cầu MadelineProto](https://docs.madelineproto.xyz/docs/REQUIREMENTS.html)
 
-Nếu gói hosting chỉ chạy PHP qua trình duyệt, hoặc chủ hosting cấm worker chạy liên tục, bản này cần chuyển sang VPS hoặc gói hỗ trợ background worker. Cron watchdog chỉ khởi động lại worker; nó không thay đổi chính sách hoặc giới hạn của hosting.
+Nếu gói hosting chỉ chạy PHP qua trình duyệt, hoặc chủ hosting cấm worker chạy liên tục, bản này cần chuyển sang VPS hoặc gói hỗ trợ background worker. Cron watchdog không thay đổi chính sách hoặc giới hạn của hosting.
+
+Watchdog kiểm tra trực tiếp tiến trình đang giữ khóa, kể cả khi tiến trình cha đã thoát. Khi heartbeat hoặc kiểm tra lịch sử nguồn ngừng tiến triển quá ngưỡng, bộ giám sát yêu cầu đúng phiên đang sở hữu IPC dừng lại, xác nhận tiến trình cũ đã thoát và khóa đã được giải phóng rồi mới khởi động phiên thay thế. Có thời gian chờ khởi động và giới hạn tần suất phục hồi; lỗi quyền, tạm dừng thủ công, giới hạn Telegram và trường hợp cần đối soát không bị tự xóa. Nếu không chứng minh được quyền sở hữu hoặc tiến trình cũ chưa thoát, bộ giám sát giữ nguyên trạng thái để tránh chạy hai phiên.
+
+`AUTH_KEY_DUPLICATED`, `AUTH_KEY_INVALID`, `AUTH_KEY_UNREGISTERED`, `SESSION_REVOKED` và `SESSION_EXPIRED` cần đăng nhập Telegram lại; khởi động lại không khôi phục khóa đã mất hiệu lực. Trang quản trị hiển thị yêu cầu này, worker ngừng dùng phiên hỏng, và watchdog không thử mở lại khóa đó. Khi phục hồi, dừng chủ sở hữu cũ và cách ly riêng thư mục `telegram.session` trước khi đăng nhập mới; giữ nguyên hàng đợi, payload, random ID, tài khoản đã gắn và mốc nguồn/đích. Các lệnh worker/login sử dụng một phiên đầy đủ trong tiến trình giữ khóa. Cầu xác minh riêng có thể chạy với `python3 deploy/password-bridge.py --no-start-worker` để hoàn tất đăng nhập trong lúc bản sửa còn đang chờ triển khai.
 
 ## Quản lý nguồn và đích trên website
 

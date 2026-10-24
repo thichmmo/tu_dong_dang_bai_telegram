@@ -87,6 +87,17 @@ class BridgeTests(unittest.TestCase):
         bridge.empty_verified = False
         bridge.empty_probe = None
         bridge.retired_requests.clear()
+        bridge.START_WORKER_AFTER_LOGIN = True
+
+    def test_recovery_login_does_not_start_worker_until_release(self):
+        self.pending('success', expiry=1000)
+        bridge.START_WORKER_AFTER_LOGIN = False
+        bridge.client.crons = [bridge.request_command(RID)]
+        self.assertEqual(bridge.status(), {'status': 'success'})
+        self.assertNotIn(bridge.WATCH, bridge.client.crons)
+        self.assertEqual(bridge.client.crons, [])
+        self.assertEqual(bridge.status(), {'status': 'success'})
+        self.assertNotIn(bridge.WATCH, bridge.client.crons)
 
     def pending(self, phase='pending', expiry=1000):
         bridge.client.files['login-2fa-request.json'] = {'request_id': RID, 'expires_at': expiry}

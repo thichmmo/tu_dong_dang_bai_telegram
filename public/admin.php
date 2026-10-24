@@ -21,7 +21,7 @@ $control = null;
 $identity = null;
 $setup = false;
 $document = ['version' => 1, 'revision' => 0, 'routes' => []];
-$status = ['fresh' => false, 'running' => false, 'revision' => null, 'config_rejected' => false, 'routes' => []];
+$status = ['fresh' => false, 'running' => false, 'needs_login' => false, 'revision' => null, 'config_rejected' => false, 'routes' => []];
 $edit = null;
 $draft = ['source' => '', 'targets' => '', 'enabled' => true];
 
@@ -298,7 +298,8 @@ $csrf = isset($_SESSION) && is_array($_SESSION) && $control !== null ? Control::
         </section>
     <?php else: ?>
         <div class="alert" role="status">
-            <?php if (!$status['fresh']): ?>Chưa có trạng thái mới từ worker. Cấu hình đã lưu vẫn được giữ lại.
+            <?php if ($status['needs_login']): ?><?= $status['fresh'] ? '' : 'Lần cập nhật gần nhất ghi nhận: ' ?>Phiên Telegram đã mất hiệu lực, cần đăng nhập lại. Kết nối lại Telegram bằng quy trình đăng nhập riêng của chủ hosting. Cấu hình nguồn và đích đã lưu vẫn được giữ.
+            <?php elseif (!$status['fresh']): ?>Chưa có trạng thái mới từ worker. Cấu hình đã lưu vẫn được giữ lại.
             <?php elseif ($status['config_rejected']): ?>Cấu hình mới chưa được áp dụng. Kiểm tra nguồn, đích và quyền của tài khoản Telegram; channel đang làm nguồn không được đồng thời làm đích.
             <?php elseif (!$status['running']): ?>Worker đang chờ hoặc cần kiểm tra. Bạn vẫn có thể cập nhật nguồn và đích.
             <?php elseif ($status['revision'] !== null && $status['revision'] === $document['revision']): ?>Worker đã đọc cấu hình hiện tại. Xem trạng thái từng nguồn bên dưới.
@@ -315,7 +316,7 @@ $csrf = isset($_SESSION) && is_array($_SESSION) && $control !== null ? Control::
                     <article class="route">
                         <div class="route-title"><span class="peer"><?= escaped($route['source']) ?></span><span class="badge<?= $route['enabled'] ? '' : ' paused' ?>"><?= $route['enabled'] ? 'Đã bật' : 'Tạm dừng' ?></span></div>
                         <ul class="destinations"><?php foreach ($route['targets'] as $target): ?><li><?= escaped($target) ?></li><?php endforeach; ?></ul>
-                        <?php if (isset($status['routes'][$route['source']]) && $route['enabled']): ?><p class="help"><?= $status['routes'][$route['source']] ? 'Nguồn sẵn sàng nhận bài.' : 'Nguồn đang chờ kiểm tra channel hoặc quyền đăng.' ?></p><?php endif; ?>
+                        <?php if (isset($status['routes'][$route['source']]) && $route['enabled']): ?><p class="help"><?= $status['needs_login'] ? 'Nguồn cần Telegram được đăng nhập lại trước khi nhận bài.' : ($status['routes'][$route['source']] ? 'Nguồn sẵn sàng nhận bài.' : 'Nguồn đang chờ kiểm tra channel hoặc quyền đăng.') ?></p><?php endif; ?>
                         <div class="actions">
                             <a class="button secondary" href="/admin.php?edit=<?= $index ?>">Chỉnh sửa</a>
                             <form method="post" action="/admin.php"><input type="hidden" name="csrf" value="<?= escaped($csrf) ?>"><input type="hidden" name="revision" value="<?= $document['revision'] ?>"><input type="hidden" name="index" value="<?= $index ?>"><input type="hidden" name="action" value="route_toggle"><button type="submit" class="secondary"><?= $route['enabled'] ? 'Tạm dừng' : 'Bật nguồn' ?></button></form>

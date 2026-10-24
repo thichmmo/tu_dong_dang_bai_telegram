@@ -1,21 +1,33 @@
 <?php
 declare(strict_types=1);
+use TelegramMirror\Control;
+ini_set('display_errors', '0');
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');
 header("Content-Security-Policy: default-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
 $ready = false;
 $allReady = false;
+$needsLogin = false;
+$statusFresh = false;
 $sourceCount = 0;
 $targetCount = 0;
-$statusFile = '/home/dwhwlekshosting/telegram-mirror-thucunghaiza/storage/deploy/live-status.json';
+$appRoot = getenv('TELEGRAM_MIRROR_ROOT') ?: '/home/dwhwlekshosting/telegram-mirror-thucunghaiza';
+$statusFile = $appRoot . '/storage/deploy/live-status.json';
+// The pure classifier reads no config/session and creates no control-plane state.
+if (!class_exists(Control::class, false) && is_file($appRoot . '/src/Control.php')
+    && !is_link($appRoot . '/src/Control.php')) { require_once $appRoot . '/src/Control.php'; }
 if (is_file($statusFile) && filesize($statusFile) <= 262144) {
     $report = json_decode((string) @file_get_contents($statusFile), true);
     $report = is_array($report) ? $report : [];
-    $heartbeat = (int) ($report['metadata']['worker_heartbeat_at'] ?? 0);
+    $metadata = is_array($report['metadata'] ?? null) ? $report['metadata'] : [];
+    $needsLogin = class_exists(Control::class, false) && method_exists(Control::class, 'needsTelegramLogin')
+        ? Control::needsTelegramLogin($report) : ($report['needs_login'] ?? null) === true;
+    $heartbeat = (int) ($metadata['worker_heartbeat_at'] ?? 0);
     $generated = (int) ($report['generated_at'] ?? 0);
+    $statusFresh = $generated > 0 && time() - $generated >= 0 && time() - $generated < 30;
     // A heartbeat alone can survive an exited worker. Require a fresh report
     // that verified the live process, and give a pause precedence over ready.
-    $ready = is_array($report) && !empty($report['ready']) && !empty($report['worker_alive']) && empty($report['paused'])
+    $ready = !$needsLogin && !empty($report['ready']) && !empty($report['worker_alive']) && empty($report['paused'])
         && $generated > 0 && time() - $generated >= 0 && time() - $generated < 30
         && $heartbeat > 0 && time() - $heartbeat >= 0 && time() - $heartbeat < 30;
     $allReady = $ready && !empty($report['all_targets_ready']);
@@ -127,7 +139,7 @@ if (is_file($statusFile) && filesize($statusFile) <= 262144) {
         <span class="brand-name">Telegram Mirror</span>
     </div>
     <section class="card" aria-labelledby="title">
-        <div class="status<?= $allReady ? ' active' : '' ?>"><span class="dot" aria-hidden="true"></span><?= $allReady ? 'Đang hoạt động' : ($ready ? 'Một cấu hình cần kiểm tra' : 'Chưa hoạt động') ?></div>
+        <div class="status<?= $allReady ? ' active' : '' ?>"><span class="dot" aria-hidden="true"></span><?= $needsLogin ? 'Cần đăng nhập lại Telegram' : ($allReady ? 'Đang hoạt động' : ($ready ? 'Một cấu hình cần kiểm tra' : 'Chưa hoạt động')) ?></div>
         <h1 id="title">Bài mới từ nguồn,<br>cập nhật về channel của bạn.</h1>
         <p class="intro">Tự đăng lại bài mới cùng ảnh, video và nội dung từ nguồn đến các channel của bạn.</p>
         <div class="channels" aria-label="Số nguồn và đích đang được cấu hình">
@@ -136,8 +148,8 @@ if (is_file($statusFile) && filesize($statusFile) <= 262144) {
             <div class="channel"><span class="label">Đích đang dùng</span><span class="username"><?= $targetCount ?> channel</span></div>
         </div>
         <div class="setup">
-            <strong><?= $ready ? 'Đang nhận bài mới' : 'Quản lý cấu hình của bạn' ?></strong>
-            <p><?= $ready ? 'Tool đang theo dõi các nguồn đã bật. Bài mới được đưa vào hàng đợi để đăng lại.' : 'Đăng nhập trang quản trị để thêm nguồn lấy bài, chọn channel đích và xem trạng thái áp dụng.' ?></p>
+            <strong><?= $needsLogin ? 'Telegram cần được kết nối lại' : ($ready ? 'Đang nhận bài mới' : 'Quản lý cấu hình của bạn') ?></strong>
+            <p><?= $needsLogin ? ($statusFresh ? '' : 'Lần cập nhật gần nhất ghi nhận: ') . 'Phiên Telegram đã mất hiệu lực, cần đăng nhập lại. Chủ hosting cần kết nối lại Telegram bằng quy trình đăng nhập riêng.' : ($ready ? 'Tool đang theo dõi các nguồn đã bật. Bài mới được đưa vào hàng đợi để đăng lại.' : 'Đăng nhập trang quản trị để thêm nguồn lấy bài, chọn channel đích và xem trạng thái áp dụng.') ?></p>
             <a class="login" href="/admin.php">Đăng nhập quản trị</a>
         </div>
     </section>

@@ -3,6 +3,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import json
+import math
 import re
 import secrets
 import subprocess
@@ -61,6 +62,17 @@ class RemoteMissing(RemoteReadFailure):
 
 class RemoteMalformed(RemoteReadFailure):
     pass
+
+
+def remote_now():
+    """All native timestamps use the authenticated hosting clock."""
+    try:
+        now = client.server_now()
+        if type(now) not in {int, float} or not math.isfinite(now) or now <= 0:
+            raise ValueError()
+        return now
+    except Exception:
+        raise RemoteUnavailable() from None
 
 
 def read_json(name):
@@ -138,6 +150,7 @@ def validated_binding():
 def empty_gate_proof():
     """No auth metadata mutation: prove emptiness under the native session lock."""
     global empty_probe, empty_verified, remote_sync_needed
+    remote_now()
     if empty_probe is None:
         nonce = secrets.token_hex(16)
         name = 'login-gate-probe-' + nonce + '.sh'
@@ -163,7 +176,7 @@ def empty_gate_proof():
         return False
     if (proof.get('request_id') != empty_probe['request_id'] or proof.get('lock_free') is not True
             or proof.get('input_safe') is not True or type(proof.get('checked_at')) is not int
-            or not 0 <= time.time() - proof['checked_at'] <= 30):
+            or not 0 <= remote_now() - proof['checked_at'] <= 30):
         return False
     # Keep the gate closed if removal is uncertain, even with a valid proof.
     remove_own_cron(empty_probe['command'])
@@ -259,7 +272,7 @@ def begin_retirement(phase):
     name = 'login-2fa-cleanup-' + active['request_id'] + '.sh'
     command = '/bin/bash ' + APP + '/deploy/' + name + ' >/dev/null 2>&1'
     active['cleanup_command'] = command
-    active.setdefault('cleanup_requested_at', int(time.time()))
+    active.setdefault('cleanup_requested_at', int(remote_now()))
     script = f'''#!/bin/bash
 set -u
 umask 077
@@ -279,11 +292,19 @@ umask 077
 
 @exclusive_cron
 def status():
+    try:
+        return _status_locked()
+    except RemoteReadFailure:
+        return {'status': 'connection_error'}
+
+
+def _status_locked():
     global active
     with gate:
         snapshot = resync_remote()
         if snapshot is None:
             return {'status': 'connection_error'}
+        remote_now()
         request, state = snapshot
         if active is None:
             if state.get('status') == 'failed' and state.get('failure_code') == 'wrong_password':
@@ -301,7 +322,7 @@ def status():
                 remove_own_cron(active['cleanup_command'])
             for key in ('retiring', 'cleanup_command', 'cleanup_requested_at', 'cleanup_scheduled'):
                 active.pop(key, None)
-        if not active.get('retiring') and phase in {'pending', 'processing'} and time.time() >= active['release_at']:
+        if not active.get('retiring') and phase in {'pending', 'processing'} and remote_now() >= active['release_at']:
             begin_retirement('expired')
         if active.get('retiring'):
             if active.get('conflict'):
@@ -314,8 +335,8 @@ def status():
                 return {'status': 'cancelling'}
             if (cleanup.get('request_id') == active['request_id'] and cleanup.get('status') in {'expired', 'cancelled'}
                     and type(cleanup.get('updated_at')) is int
-                    and active['cleanup_requested_at'] <= cleanup['updated_at'] <= time.time()
-                    and time.time() - cleanup['updated_at'] <= 30):
+                    and active['cleanup_requested_at'] <= cleanup['updated_at'] <= remote_now()
+                    and remote_now() - cleanup['updated_at'] <= 30):
                 remove_own_cron(active['command']); remove_own_cron(active['cleanup_command'])
                 retired_requests.add(active['request_id'])
                 phase = cleanup['status']; active = None
@@ -341,11 +362,14 @@ def status():
                     live = json.loads(client.read(STORE + '/deploy', 'live-status.json'))
                     heartbeat = int(live.get('metadata', {}).get('worker_heartbeat_at') or 0)
                     generated = int(live.get('generated_at') or 0)
-                    fresh = 0 <= time.time() - generated < 30
+                    now = remote_now()
+                    fresh = 0 <= now - generated < 30
                     if fresh and (live.get('paused') or live.get('receiving_ready') and not live.get('ready')):
                         return {'status': 'paused'}
-                    if fresh and live.get('ready') and live.get('worker_alive') and 0 <= time.time() - heartbeat < 30:
+                    if fresh and live.get('ready') and live.get('worker_alive') and 0 <= now - heartbeat < 30:
                         return {'status': 'ready' if live.get('all_targets_ready') else 'partial'}
+                except RemoteReadFailure:
+                    raise
                 except Exception:
                     pass
                 return {'status': 'starting'}
@@ -373,7 +397,7 @@ def submit(password):
             raise RuntimeError('Authentication request already pending')
         attempts.append(now)
         request_id = secrets.token_hex(16)
-        expiry = int(time.time()) + 180
+        expiry = int(remote_now()) + 170
         found = re.findall(r"'api_hash'\s*=>\s*'([a-fA-F0-9]{32})'", (ROOT / 'config.php').read_text())
         if len(found) != 1:
             raise RuntimeError('Private API configuration unavailable')
@@ -406,7 +430,7 @@ mkdir "$appdir/storage/deploy/login-2fa-{request_id}.started" 2>/dev/null || exi
             # Gate before further mutations: an uncertain API outcome must
             # never let another submission overwrite this envelope's binding.
             replace_metadata('login-2fa-request.json', {'request_id': request_id, 'expires_at': expiry})
-            replace_metadata('login-2fa-state.json', {'request_id': request_id, 'status': 'pending', 'updated_at': int(time.time())})
+            replace_metadata('login-2fa-state.json', {'request_id': request_id, 'status': 'pending', 'updated_at': int(remote_now())})
             script = folder / wrapper_name
             script.write_text(wrapper); script.chmod(0o600)
             result = client.upload(APP + '/deploy', [script])

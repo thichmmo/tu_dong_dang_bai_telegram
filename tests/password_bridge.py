@@ -26,6 +26,13 @@ class FakeHosting:
         self.read_failures = set()
         self.auto_probe = True
         self.calls = []
+        self.clock_skew = 0
+        self.clock_error = None
+
+    def server_now(self):
+        if self.clock_error is not None:
+            raise self.clock_error
+        return bridge.time.time() + self.clock_skew
 
     def read(self, directory, name):
         self.calls.append(('read', name))
@@ -72,7 +79,7 @@ class FakeHosting:
                 self.files['login-gate-probe-' + nonce + '.json'] = {
                     'request_id': nonce, 'lock_free': True,
                     'input_safe': safe and 'login-2fa-envelope.json' not in self.files,
-                    'checked_at': int(bridge.time.time()),
+                    'checked_at': int(self.server_now()),
                 }
         return []
 
@@ -98,6 +105,86 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.client.crons, [])
         self.assertEqual(bridge.status(), {'status': 'success'})
         self.assertNotIn(bridge.WATCH, bridge.client.crons)
+
+    @patch.object(bridge.time, 'time', return_value=1000)
+    def test_host_clock_skew_preserves_gate_and_remote_expiry_headroom(self, _):
+        bridge.client.clock_skew = 166
+        self.assertEqual(bridge.status(), {'status': 'input'})
+        self.assertIsNone(bridge.empty_probe)
+        # Stub encryption only; no actual password, config, Node or network.
+        encrypted = type('Encrypted', (), {'stdout': ''})()
+        def encrypt(*args, **kwargs):
+            value = json.loads(kwargs['input'])
+            self.assertEqual(value['expires_at'], 1336)
+            self.assertEqual(value['expires_at'] - bridge.client.server_now(), 170)
+            encrypted.stdout = json.dumps({'request_id': value['request_id'],
+                                          'expires_at': value['expires_at']})
+            return encrypted
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'config.php').write_text("<?php return ['api_hash' => '" + '0' * 32 + "'];")
+            with patch.object(bridge, 'ROOT', root), \
+                    patch.object(bridge.subprocess, 'run', side_effect=encrypt):
+                bridge.submit('synthetic-only')
+        self.assertEqual(bridge.active['expires_at'], 1336)
+        self.assertEqual(bridge.active['release_at'], 1646)
+        state = json.loads(bridge.client.files['login-2fa-state.json'])
+        self.assertEqual(state['updated_at'], 1166)
+        envelope = json.loads(bridge.client.files['login-2fa-envelope.json'])
+        self.assertEqual(envelope['expires_at'], 1336)
+        self.assertEqual(envelope['request_id'], bridge.active['request_id'])
+        # Retry accounting stays on the local clock.
+        self.assertEqual(bridge.attempts, [1000])
+
+    @patch.object(bridge.time, 'time', return_value=1400)
+    def test_host_clock_skew_controls_release_and_fresh_cleanup(self, _):
+        bridge.client.clock_skew = 166
+        self.pending('processing', expiry=1200)
+        self.assertEqual(bridge.status()['status'], 'cancelling')
+        self.assertEqual(bridge.active['cleanup_requested_at'], 1566)
+        name = 'login-2fa-cleanup-' + RID + '.json'
+        # Native proof is fresh on hosting even though it is future-dated here.
+        bridge.client.files[name] = {'request_id': RID, 'status': 'expired', 'updated_at': 1566}
+        self.assertEqual(bridge.status(), {'status': 'expired'})
+        self.assertIsNone(bridge.active)
+        self.assertEqual(bridge.client.crons, [])
+
+    @patch.object(bridge.time, 'time', return_value=1100)
+    def test_host_clock_skew_live_freshness_keeps_strict_thirty_second_gate(self, _):
+        bridge.client.clock_skew = 166
+        self.pending('success', expiry=1200)
+        live = {'ready': True, 'worker_alive': True, 'paused': False,
+                'all_targets_ready': True, 'generated_at': 1266,
+                'metadata': {'worker_heartbeat_at': 1266}}
+        bridge.client.files['live-status.json'] = live
+        self.assertEqual(bridge.status(), {'status': 'ready'})
+        live['generated_at'] = 1236
+        self.assertEqual(bridge.status(), {'status': 'starting'})
+        live['generated_at'] = 1267
+        self.assertEqual(bridge.status(), {'status': 'starting'})
+
+    def test_unavailable_host_clock_never_opens_input_or_uploads_envelope(self):
+        for error in (RuntimeError('malformed sample'), RuntimeError('stale sample')):
+            with self.subTest(error=str(error)):
+                self.setUp(); bridge.client.clock_error = error
+                self.assertEqual(bridge.status(), {'status': 'connection_error'})
+                with self.assertRaises(bridge.RemoteUnavailable):
+                    bridge.submit('synthetic-only')
+                self.assertIsNone(bridge.active)
+                self.assertEqual(bridge.attempts, [])
+                self.assertNotIn('login-2fa-envelope.json', bridge.client.files)
+                self.assertFalse(any(call[0] in {'add_line', 'save_file_content'}
+                                     for call in bridge.client.calls))
+
+    @patch.object(bridge.time, 'time', return_value=1400)
+    def test_unavailable_host_clock_cannot_release_pending_request(self, _):
+        self.pending('processing', expiry=1)
+        bridge.client.clock_error = RuntimeError('stale sample')
+        self.assertEqual(bridge.status(), {'status': 'connection_error'})
+        self.assertEqual(bridge.active['request_id'], RID)
+        self.assertFalse(bridge.active.get('retiring'))
+        self.assertFalse(any(call[0] in {'add_line', 'save_file_content'}
+                             for call in bridge.client.calls))
 
     def pending(self, phase='pending', expiry=1000):
         bridge.client.files['login-2fa-request.json'] = {'request_id': RID, 'expires_at': expiry}

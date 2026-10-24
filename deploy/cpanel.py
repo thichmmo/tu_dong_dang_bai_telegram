@@ -1,13 +1,21 @@
 """Local deployment helper. Credentials are read from host.txt, never echoed."""
 from pathlib import Path
+import email.utils
 import json
+import math
 import mimetypes
+import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
 from cron_lock import cron_digest, cron_writer
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+class ServerClockUnavailable(RuntimeError):
+    pass
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -29,6 +37,48 @@ class CPanel:
             raise ValueError('Invalid cPanel port')
         self.opener = urllib.request.build_opener(NoRedirect())
         self.headers = {'Authorization': 'cpanel ' + lines[1].strip() + ':' + lines[2].strip(), 'Accept': 'application/json'}
+        self._clock_lock = threading.Lock()
+        self._server_clock = None
+
+    def _record_server_clock(self, response, before, after):
+        """Only a direct TLS response with a bounded RTT can calibrate time."""
+        sample = None
+        try:
+            dates = response.headers.get_all('Date') or []
+            origin = urllib.parse.urlsplit(response.geturl())
+            expected = urllib.parse.urlsplit(self.base)
+            if (len(dates) != 1 or not isinstance(dates[0], str)
+                    or origin.scheme != 'https' or origin.hostname != expected.hostname
+                    or (origin.port or 443) != (expected.port or 443)
+                    or origin.username is not None or origin.password is not None
+                    or response.getcode() != 200
+                    or not all(math.isfinite(stamp) for stamp in (before, after))
+                    or not 0 <= after - before <= 5):
+                raise ValueError()
+            parsed = email.utils.parsedate_to_datetime(dates[0])
+            # Round-trip rejects permissive parser inputs, including incorrect
+            # weekdays, non-GMT zones, duplicate values and obsolete formats.
+            if email.utils.format_datetime(parsed, usegmt=True) != dates[0]:
+                raise ValueError()
+            epoch = parsed.timestamp()
+            if not math.isfinite(epoch) or epoch <= 0:
+                raise ValueError()
+            sample = (epoch, (before + after) / 2)
+        except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
+            pass
+        with self._clock_lock:
+            self._server_clock = sample
+
+    def server_now(self):
+        """Hosting time extrapolated briefly with monotonic time, never local UTC."""
+        with self._clock_lock:
+            sample = self._server_clock
+        current = time.monotonic()
+        if sample is not None and math.isfinite(current):
+            epoch, anchor = sample
+            if 0 <= current - anchor <= 30:
+                return epoch + current - anchor
+        raise ServerClockUnavailable('Fresh authenticated hosting clock unavailable')
 
     def request(self, path, params=None, body=None, content_type=None, timeout=45):
         url = self.base + path
@@ -37,7 +87,12 @@ class CPanel:
         headers = dict(self.headers)
         if content_type:
             headers['Content-Type'] = content_type
+        with self._clock_lock:
+            self._server_clock = None
+        before = time.monotonic()
         with self.opener.open(urllib.request.Request(url, data=body, headers=headers), timeout=timeout) as response:
+            after = time.monotonic()
+            self._record_server_clock(response, before, after)
             return json.load(response)
 
     def uapi(self, module, function, **params):
